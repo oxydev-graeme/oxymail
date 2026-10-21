@@ -36,3 +36,24 @@ OxyMail is an independent project and is not affiliated with Mailbird. It contai
 ## Licence
 
 GPL-3.0. See [LICENSE](LICENSE).
+
+## Building
+
+```sh
+cargo build --release
+```
+
+If the repo is on a network share mounted `noexec`, put the build output on a local disk:
+`CARGO_TARGET_DIR=~/.cache/oxymail-target cargo build --release`.
+
+## Mailbird export
+
+```sh
+oxymail-mailbird-export --store /path/to/copy/of/Mailbird/Store --out ~/MailbirdExport
+```
+
+- Always run it against a **copy** of `%LOCALAPPDATA%\Mailbird\Store`. The store is opened read-only either way.
+- **Mail:** Maildir output at `mail/<account>/<folder>/cur/`. A message that sits in several folders, such as Gmail labels, is hard-linked rather than copied.
+- **Raw tables:** every non-secret table is written to `raw/<table>.jsonl`. Passwords, OAuth tokens and sync tokens are never exported.
+- **Report:** `report.json` lists counts per account and folder, along with any missing bodies or attachments.
+- **Missing parts:** where a body or attachment was never downloaded by Mailbird, the message is marked with an `X-OxyMail-Missing` or `X-OxyMail-Missing-Attachment` header.
