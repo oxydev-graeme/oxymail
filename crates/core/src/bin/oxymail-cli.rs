@@ -42,7 +42,7 @@ fn main() -> Result<()> {
                 "subject": view.subject, "from": view.from, "to": view.to, "cc": view.cc,
                 "date": view.date, "html_chars": view.html.as_ref().map(|h| h.len()),
                 "text_chars": view.text.as_ref().map(|t| t.len()),
-                "attachments": view.attachments, "notices": view.notices,
+                "attachments": view.attachments, "notices": view.notices, "from_addr": view.from_addr, "has_remote_content": view.has_remote_content, "images_allowed": view.images_allowed, "unsubscribe": view.unsubscribe,
             }))?);
         }
         _ => bail!("usage: oxymail-cli <import|accounts|search|show> ..."),

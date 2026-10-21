@@ -27,6 +27,9 @@ export const api = {
   syncNow: (accountId = null) => invoke("sync_now", { accountId }),
   sendMessage: (accountId, mail) => invoke("send_message", { accountId, mail }),
   liveConfig: (accountId) => invoke("live_config", { accountId }),
+  setImagesAllowed: (email, allowed) => invoke("set_images_allowed", { email, allowed }),
+  openUrl: (url) => invoke("open_url", { url }),
+  openAttachment: (id, index) => invoke("open_attachment", { id, index }),
   suggestContacts: (query) => invoke("suggest_contacts", { query }),
   messagesByRole: (role, offset, limit) => invoke("messages_by_role", { role, offset, limit }),
   unreadByRole: (role) => invoke("unread_by_role", { role }),
@@ -101,12 +104,16 @@ export function formatSize(bytes) {
 }
 
 /**
- * Wraps message HTML for a sandboxed iframe. The CSP blocks scripts and every remote
- * request (tracking pixels, remote images, fonts); only inline styles and data: images load.
+ * Wraps message HTML for a sandboxed iframe. The CSP blocks scripts and, unless `allowRemote`,
+ * every remote request (tracking pixels, remote images, fonts); inline styles and data: images
+ * always load.
  */
-export function messageDocument(html) {
+export function messageDocument(html, allowRemote = false) {
+  const csp = allowRemote
+    ? "default-src 'none'; img-src data: https: http:; style-src 'unsafe-inline' https: http:; font-src data: https:"
+    : "default-src 'none'; img-src data:; style-src 'unsafe-inline'";
   return `<!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
 <base target="_blank">
 <style>
   html { color-scheme: light; }
@@ -134,6 +141,11 @@ export function fileToBase64(file) {
 export function quotableHtml(html) {
   const doc = new DOMParser().parseFromString(html, "text/html");
   doc.querySelectorAll("style, script, link, meta, title, iframe, object, embed, form").forEach((n) => n.remove());
+  // Remote images would load (and report the read) inside Compose; keep only embedded ones.
+  doc.querySelectorAll("img").forEach((img) => {
+    if (!/^(data|cid):/i.test(img.getAttribute("src") ?? "")) img.remove();
+  });
+  doc.querySelectorAll("[background]").forEach((n) => n.removeAttribute("background"));
   return doc.body.innerHTML;
 }
 
@@ -141,3 +153,15 @@ export const escapeHtml = (text) =>
   text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 export const PROVIDER_NAMES = { google: "Google", microsoft: "Microsoft" };
+
+/** `mailto:a@b?subject=x&cc=y` → { to, cc, subject, body }. */
+export function parseMailto(url) {
+  const [address, query = ""] = url.replace(/^mailto:/i, "").split("?");
+  const params = new URLSearchParams(query);
+  return {
+    to: decodeURIComponent(address),
+    cc: params.get("cc") ?? "",
+    subject: params.get("subject") ?? "",
+    body: params.get("body") ?? "",
+  };
+}

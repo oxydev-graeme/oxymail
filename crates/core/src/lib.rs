@@ -72,7 +72,8 @@ create table if not exists contacts (
     uses integer not null default 0,
     last_used integer not null default 0,
     in_address_book integer not null default 0,
-    blocked integer not null default 0
+    blocked integer not null default 0,
+    images_allowed integer not null default 0
 );
 create table if not exists settings (
     key text primary key,
@@ -234,6 +235,13 @@ pub struct MessageView {
     pub attachments: Vec<AttachmentInfo>,
     /// OxyMail notes added at export time, such as a body Mailbird never downloaded.
     pub notices: Vec<String>,
+    pub from_addr: Option<String>,
+    /// The HTML loads images or styles from the web (blocked unless allowed).
+    pub has_remote_content: bool,
+    /// Remote content from this sender is allowed (Settings or "Always for this sender").
+    pub images_allowed: bool,
+    /// Unsubscribe targets from List-Unsubscribe: https: and mailto: URLs.
+    pub unsubscribe: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -453,16 +461,34 @@ impl Store {
     }
 
     /// Full-text search across every account. Plain words are matched as prefixes.
+    /// Searches every account. Plain words match anywhere (as prefixes); filters narrow it:
+    /// `from:` `to:` `subject:` `has:attachment` `is:unread|read|starred` `in:<folder>`
+    /// `account:<text>` `before:`/`after:YYYY-MM-DD`, and "quoted phrases".
     pub fn search(&self, query: &str, limit: i64) -> Result<Vec<MessageSummary>> {
-        let fts = fts_query(query);
-        if fts.is_empty() {
+        let q = parse_search(query);
+        if q.fts.is_empty() && q.conditions.is_empty() {
             return Ok(Vec::new());
         }
-        self.summaries(
-            "join (select rowid as hit, rank from messages_fts where messages_fts match ?1) s on s.hit = m.id
-             where m.deleted = 0 order by s.rank limit ?2",
-            params![fts, limit],
-        )
+        let mut values: Vec<rusqlite::types::Value> = Vec::new();
+        let mut tail = String::new();
+        if !q.fts.is_empty() {
+            values.push(q.fts.into());
+            tail.push_str("join (select rowid as hit, rank from messages_fts where messages_fts match ?1) s on s.hit = m.id ");
+        }
+        tail.push_str("where m.deleted = 0");
+        for (sql, value) in q.conditions {
+            match value {
+                Some(v) => {
+                    values.push(v);
+                    tail.push_str(&format!(" and {}", sql.replace('?', &format!("?{}", values.len()))));
+                }
+                None => tail.push_str(&format!(" and {sql}")),
+            }
+        }
+        values.push(limit.into());
+        let order = if tail.starts_with("join") { "s.rank" } else { "m.date desc" };
+        tail.push_str(&format!(" order by {order} limit ?{}", values.len()));
+        self.summaries(&tail, rusqlite::params_from_iter(values))
     }
 
     fn summaries(&self, tail: &str, params: impl rusqlite::Params) -> Result<Vec<MessageSummary>> {
@@ -565,9 +591,35 @@ impl Store {
             mail_parser::HeaderValue::TextList(list) => list.iter().map(|t| t.to_string()).collect(),
             _ => Vec::new(),
         };
+        let from_addr = msg.from().and_then(|a| a.first()).and_then(|a| a.address()).map(|a| a.to_lowercase());
+        let images_allowed = match &from_addr {
+            Some(addr) => self
+                .db
+                .query_row("select images_allowed from contacts where email = ?1", [addr], |r| r.get(0))
+                .optional()?
+                .unwrap_or(false),
+            None => false,
+        };
+        let has_remote_content = html.as_deref().is_some_and(|h| {
+            let h = h.to_ascii_lowercase();
+            ["src=\"http", "src='http", "src=http", "url(http", "url('http", "url(\"http", "srcset=\"http"].iter().any(|p| h.contains(p))
+        });
+        let unsubscribe = msg
+            .header_raw("List-Unsubscribe")
+            .map(|v| {
+                v.split(',')
+                    .map(|p| p.trim().trim_start_matches('<').trim_end_matches('>').trim().to_string())
+                    .filter(|u| u.starts_with("https://") || u.starts_with("http://") || u.starts_with("mailto:"))
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(MessageView {
             id,
             account_id,
+            from_addr,
+            has_remote_content,
+            images_allowed,
+            unsubscribe,
             message_id: msg.message_id().map(str::to_string),
             references,
             reply_to: address_list(msg.reply_to()),
@@ -719,6 +771,13 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Remembers whether remote images may load for mail from this sender.
+    pub fn set_images_allowed(&self, email: &str, allowed: bool) -> Result<()> {
+        note_contact(&self.db, email, None, 0, 0)?;
+        self.db.execute("update contacts set images_allowed = ?2 where email = lower(?1)", params![email, allowed])?;
+        Ok(())
+    }
+
     /// Counts the people you write to, so they rank higher in suggestions.
     pub fn note_sent_to(&self, addresses: &[String]) -> Result<()> {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
@@ -862,6 +921,9 @@ fn migrate(db: &Connection) -> Result<()> {
     add_missing_columns(db, "folders", FOLDER_COLUMNS_V4)?;
     add_missing_columns(db, "messages", &[("uid", "integer"), ("from_archive", "integer not null default 0")])?;
     add_missing_columns(db, "accounts", &[("archive_root", "text")])?;
+    if db.query_row("select count(*) from sqlite_master where name = 'contacts'", [], |r| r.get::<_, i64>(0))? > 0 {
+        add_missing_columns(db, "contacts", &[("images_allowed", "integer not null default 0")])?;
+    }
     if version < 5 {
         // v5: an archive account can be connected to its server and become live, so its
         // archive location moves to `archive_root` and archive message paths become absolute
@@ -1007,6 +1069,9 @@ fn import_mailbird_contacts(
         let Some(email) = text(c, "Email") else { continue };
         let when = text(c, "LatestMessageAt_UTC").as_deref().and_then(parse_utc).unwrap_or(0);
         note_contact(db, &email, text(c, "Name").as_deref(), 0, when)?;
+        if c.get("IsWhitelistedForImages").and_then(|x| x.as_i64()) == Some(1) {
+            db.execute("update contacts set images_allowed = 1 where email = lower(?1)", [&email])?;
+        }
         if c.get("IsBlocked").and_then(|x| x.as_i64()) == Some(1) {
             db.execute("update contacts set blocked = 1 where email = lower(?1)", [&email])?;
         }
@@ -1123,7 +1188,65 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
+struct SearchQuery {
+    fts: String,
+    /// SQL conditions; a `?` is replaced with the numbered parameter for its value.
+    conditions: Vec<(String, Option<rusqlite::types::Value>)>,
+}
+
+/// Splits a search box query into full-text terms and filters.
+fn parse_search(input: &str) -> SearchQuery {
+    let mut fts: Vec<String> = Vec::new();
+    let mut conditions = Vec::new();
+    let mut tokens = Vec::new();
+    let mut chars = input.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+            continue;
+        }
+        let mut token = String::new();
+        let mut quoted = false;
+        while let Some(&c) = chars.peek() {
+            if c == '"' {
+                quoted = !quoted;
+                chars.next();
+            } else if c.is_whitespace() && !quoted {
+                break;
+            } else {
+                token.push(c);
+                chars.next();
+            }
+        }
+        tokens.push(token);
+    }
+    let phrase = |text: &str| format!("\"{}\"*", text.replace('"', ""));
+    for token in tokens.into_iter().filter(|t| !t.is_empty()) {
+        let (key, value) = token.split_once(':').map(|(k, v)| (k.to_lowercase(), v.to_string())).unwrap_or_default();
+        let value_lower = value.to_lowercase();
+        match key.as_str() {
+            "from" if !value.is_empty() => fts.push(format!("sender : {}", phrase(&value))),
+            "to" if !value.is_empty() => fts.push(format!("recipients : {}", phrase(&value))),
+            "subject" if !value.is_empty() => fts.push(format!("subject : {}", phrase(&value))),
+            "has" if value_lower.starts_with("attach") => conditions.push(("m.attachments > 0".into(), None)),
+            "is" if value_lower == "unread" => conditions.push(("instr(m.flags, 'S') = 0".into(), None)),
+            "is" if value_lower == "read" => conditions.push(("instr(m.flags, 'S') > 0".into(), None)),
+            "is" if value_lower == "starred" || value_lower == "flagged" => conditions.push(("instr(m.flags, 'F') > 0".into(), None)),
+            "in" if !value.is_empty() => conditions.push(("(f.role = ? or lower(f.name) = ?)".into(), Some(value_lower.clone().into()))),
+            "account" if !value.is_empty() => conditions.push(("a.name like '%' || ? || '%'".into(), Some(value_lower.into()))),
+            "before" | "after" if parse_utc(&format!("{value} 00:00:00Z")).is_some() => {
+                let ts = parse_utc(&format!("{value} 00:00:00Z")).unwrap_or(0);
+                let op = if key == "before" { "<" } else { ">=" };
+                conditions.push((format!("m.date {op} ?"), Some(ts.into())));
+            }
+            _ => fts.push(phrase(&token)),
+        }
+    }
+    SearchQuery { fts: fts.join(" "), conditions }
+}
+
 /// Turns free text into an FTS5 query: each word quoted and prefix-matched, all required.
+#[cfg(test)]
 fn fts_query(input: &str) -> String {
     input
         .split_whitespace()
@@ -1148,6 +1271,14 @@ mod tests {
     fn search_words_are_quoted_prefixes() {
         assert_eq!(fts_query(r#"invoice "acme"#), r#""invoice"* "acme"*"#);
         assert_eq!(fts_query("   "), "");
+    }
+
+    #[test]
+    fn search_filters_split_into_fts_and_conditions() {
+        let q = parse_search(r#"from:monica has:attachment "tax invoice" is:unread before:2025-01-01"#);
+        assert_eq!(q.fts, r#"sender : "monica"* "tax invoice"*"#);
+        assert_eq!(q.conditions.len(), 3);
+        assert!(parse_search("is:starred").fts.is_empty());
     }
 
     #[test]

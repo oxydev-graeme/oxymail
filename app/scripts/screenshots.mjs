@@ -39,12 +39,15 @@ const mock = () => {
     from: ["Monica <monica@euroappliances.co.za>"], to: ["graeme@oxydev.co.za"], cc: ["accounts@euroappliances.co.za", "someone.else.with.a.long.address@example.com"],
     date: now - 3600, html: "<p>Hi Graeme,</p>" + "<p>Please find attached the updated invoice. ".repeat(4) + "</p>".repeat(1) + Array.from({ length: 40 }, (_, i) => `<p>Line ${i + 1} of a long email body to test scrolling.</p>`).join("") + '<table width="900" border="1"><tr><td>Wide table cell</td><td>Another cell that is wide</td></tr></table>',
     text: null, attachments: [{ index: 0, name: "Invoice-0000146.pdf", content_type: "application/pdf", size: 81234 }, { index: 1, name: "Statement September 2026 with a very long file name.xlsx", content_type: "application/vnd", size: 22111 }],
-    notices: ["Attachment not available: SWIFT_PO#110026171505.zip (4533 bytes)"] });
+    notices: ["Attachment not available: SWIFT_PO#110026171505.zip (4533 bytes)"],
+    from_addr: "monica@euroappliances.co.za", has_remote_content: true, images_allowed: false,
+    unsubscribe: ["https://example.com/unsubscribe"] });
   const settings = { theme: window.__THEME__ ?? "system", density: "comfortable", mark_read_on_open: "true" };
   const handlers = {
     accounts: () => accounts, folders: ({ accountId }) => folders(accountId), messages: ({ folderId, offset }) => (offset ? [] : msgs(folderId)),
     message: ({ id }) => view(id), settings: () => settings, set_setting: () => null, data_location: () => "/home/graeme/.local/share/oxymail/oxymail.db",
     search: () => [], set_flag: () => null,
+    move_to_folder: (args) => { (window.__calls ??= []).push(["move_to_folder", args]); return null; },
     live_config: () => ({ email: "graeme@oxydev.co.za", username: "graeme@oxydev.co.za", source: "the provider's autoconfig", oauth: null,
       imap: { host: "mail.oxydev.co.za", port: 993, security: "tls" }, smtp: { host: "mail.oxydev.co.za", port: 465, security: "tls" } }),
     messages_by_role: () => msgs(100).map((m, k) => ({ ...m, account_id: (k % 6) + 1 })),
@@ -100,6 +103,22 @@ const shots = [
   }],
   ["forward", 1360, 860, "dark", async (p) => { await p.click(".row-main"); await p.click("button:has-text('Forward')"); }],
   ["settings-reading", 1360, 860, "light", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Reading & sending")'); }],
+  ["multi-select", 1360, 860, "dark", async (p) => {
+    const rows = p.locator(".row-main");
+    await rows.nth(0).click(); await rows.nth(2).click({ modifiers: ["Control"] }); await rows.nth(4).click({ modifiers: ["Control"] });
+    console.log("CHECK selected rows:", await p.locator(".row.selected").count(), "(expect 3)");
+  }],
+  ["move-picker", 1360, 860, "dark", async (p) => { await p.click(".row-main"); await p.click("button:has-text('Move')"); }],
+  ["drag-to-folder", 1360, 860, "dark", async (p) => {
+    const rows = p.locator(".row-main");
+    await rows.nth(0).click();
+    await p.locator(".row").nth(3).dragTo(p.locator(".folder", { hasText: "Invoices" }));
+    await p.waitForTimeout(300);
+    const calls = await p.evaluate(() => window.__calls ?? []);
+    const moved = calls.find((c) => c[0] === "move_to_folder");
+    console.log("CHECK drag moved ids:", JSON.stringify(moved?.[1]?.ids), "to folder", moved?.[1]?.folderId, "(expect the 4th row, not the open one)");
+  }],
+  ["shortcuts", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Shortcuts & search")'); await p.locator(".content").evaluate((el) => (el.scrollTop = 400)); }],
   ["add-account-gmail", 1360, 860, "dark", async (p) => {
     await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")');
     await p.click('.dialog button:text-is("Add account")'); await p.fill('input[type="email"]', "hello@oxyaccounting.co.za");

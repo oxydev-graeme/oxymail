@@ -30,6 +30,7 @@
     replyAll: "M13 8l-5 5 5 5M8 8l-5 5 5 5M8 13h7a6 6 0 0 1 6 6",
     forward: "M14 8l6 5-6 5M20 13H10a6 6 0 0 0-6 6",
     plus: "M12 5v14M5 12h14",
+    download: "M12 4v11M7 10l5 5 5-5M5 20h14",
   };
 </script>
 

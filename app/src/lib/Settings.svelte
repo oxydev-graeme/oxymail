@@ -24,7 +24,7 @@
     ["accounts", "Accounts"],
     ["signin", "Sign-in"],
     ["import", "Import"],
-    ["shortcuts", "Shortcuts"],
+    ["shortcuts", "Shortcuts & search"],
     ["about", "About"],
   ];
 
@@ -36,6 +36,10 @@
     ["s", "Star or unstar"],
     ["u", "Mark read or unread"],
     ["/", "Search"],
+    ["v", "Move to folder"],
+    ["Ctrl+A", "Select all loaded messages"],
+    ["Ctrl / Shift + click", "Add to selection / select a range"],
+    ["c, r, a, f", "New, reply, reply all, forward"],
     ["Esc", "Clear search or close this panel"],
   ];
 
@@ -160,6 +164,15 @@
             {/each}
           </tbody>
         </table>
+        <h2 class="second">Search filters</h2>
+        <table>
+          <tbody>
+            {#each [["from:monica", "Sender name or address"], ["to:accounts@", "Recipient"], ["subject:invoice", "Words in the subject"], ['"tax invoice"', "An exact phrase"], ["has:attachment", "Only messages with attachments"], ["is:unread  is:read  is:starred", "By status"], ["in:sent  in:archive", "Folder (by role or name)"], ["account:oxydev", "Accounts whose address contains this"], ["before:2025-01-01  after:2024-06-30", "By date"]] as [example, meaning]}
+              <tr><td><kbd>{example}</kbd></td><td>{meaning}</td></tr>
+            {/each}
+          </tbody>
+        </table>
+        <p class="hint">Filters combine with plain words, e.g. <kbd>from:monica has:attachment invoice</kbd>.</p>
       {:else}
         <div class="about">
           <Logo size={56} />
@@ -243,6 +256,7 @@
   .primary:disabled { opacity: 0.6; }
   code { font-size: 12px; color: var(--muted); word-break: break-all; }
   table { border-collapse: collapse; font-size: 13px; }
+  h2.second { margin-top: 26px; }
   td { padding: 6px 16px 6px 0; }
   kbd {
     padding: 2px 7px;

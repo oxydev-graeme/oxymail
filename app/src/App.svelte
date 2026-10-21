@@ -1,12 +1,13 @@
 <script>
   import { onMount } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { api, listen, isLive, quotableHtml, escapeHtml, accountLabel, DEFAULT_SETTINGS, shortDate, longDate, formatSize, messageDocument } from "./lib/api.js";
+  import { api, listen, isLive, quotableHtml, escapeHtml, parseMailto, accountLabel, DEFAULT_SETTINGS, shortDate, longDate, formatSize, messageDocument } from "./lib/api.js";
   import Logo from "./lib/Logo.svelte";
   import Icon from "./lib/Icon.svelte";
   import Settings from "./lib/Settings.svelte";
   import Avatar from "./lib/Avatar.svelte";
   import Compose from "./lib/Compose.svelte";
+  import MovePicker from "./lib/MovePicker.svelte";
 
   const PAGE = 200;
   const appWindow = getCurrentWindow();
@@ -54,6 +55,13 @@
   let error = $state("");
 
   let selected = $derived(list.find((m) => m.id === selectedId) ?? null);
+  /** Every selected message id (Ctrl/Shift-click); one entry for an ordinary selection. */
+  let selectedIds = $state([]);
+  let anchorId = null;
+  let multi = $derived(selectedIds.length > 1);
+  let selectedMsgs = $derived(list.filter((m) => selectedIds.includes(m.id)));
+  let moving = $state(null);
+  let remoteAllowed = $state(false);
   /** Role of the folder the selected message is in (search results can span folders). */
   let selectedRole = $derived(selected?.folder_role ?? null);
   let selectedLive = $derived(isLive(accounts.find((a) => a.id === selected?.account_id)));
@@ -101,6 +109,10 @@
         if (folder) folder = folders.find((f) => f.id === folder.id) ?? folder;
         if (!searching) refreshList();
       }
+    });
+    listen("compose-mailto", ({ payload }) => {
+      const m = parseMailto(payload);
+      composing = { account_id: sendingAccount(selected), to: m.to, cc: m.cc, subject: m.subject, quote: m.body ? escapeHtml(m.body) : undefined };
     });
     listen("sync-error", ({ payload }) => {
       error = payload.error;
@@ -283,6 +295,9 @@
 
   async function select(id) {
     selectedId = id;
+    selectedIds = [id];
+    anchorId = id;
+    remoteAllowed = false;
     try {
       view = await api.message(id);
       const m = list.find((x) => x.id === id);
@@ -332,11 +347,16 @@
     });
   }
 
-  const archive = (m = selected) => moveAway(m, () => api.moveTo([m.id], "archive"), "Archived");
-  const moveToInbox = (m = selected) => moveAway(m, () => api.moveTo([m.id], "inbox"), "Moved to Inbox");
-  const restore = (m = selected) => moveAway(m, () => api.restore([m.id]), "Restored");
+  const archive = (m = null) => (m && !selectedIds.includes(m.id) ? moveAway(m, () => api.moveTo([m.id], "archive"), "Archived") : bulkMove((ids) => api.moveTo(ids, "archive"), "Archived"));
+  const moveToInbox = (m = null) => (m && !selectedIds.includes(m.id) ? moveAway(m, () => api.moveTo([m.id], "inbox"), "Moved to Inbox") : bulkMove((ids) => api.moveTo(ids, "inbox"), "Moved to Inbox"));
+  const restore = (m = null) => (m && !selectedIds.includes(m.id) ? moveAway(m, () => api.restore([m.id]), "Restored") : bulkMove((ids) => api.restore(ids), "Restored"));
 
   function remove(m = selected) {
+    if (multi && (!m || selectedIds.includes(m.id))) {
+      const inTrash = selectedMsgs.every((x) => x.folder_role === "trash");
+      if (inTrash && !confirm(`Delete ${selectedMsgs.length} messages forever?\n\nLive mail is removed from the server; archive copies on disk are kept.`)) return;
+      return bulkMove((ids) => api.remove(ids), inTrash ? "Deleted" : "Moved to Trash:", !inTrash);
+    }
     if (!m) return;
     if (m.folder_role === "trash") {
       const live = isLive(accounts.find((a) => a.id === m.account_id));
@@ -363,10 +383,117 @@
     }
   }
 
+  /** Ctrl/Cmd-click toggles a message in the selection; Shift-click selects a range. */
+  function rowClick(event, m) {
+    if (event.ctrlKey || event.metaKey) {
+      selectedIds = selectedIds.includes(m.id) ? selectedIds.filter((x) => x !== m.id) : [...selectedIds, m.id];
+      anchorId = m.id;
+      if (selectedIds.length === 1) select(selectedIds[0]);
+    } else if (event.shiftKey && anchorId !== null) {
+      const a = list.findIndex((x) => x.id === anchorId);
+      const b = list.findIndex((x) => x.id === m.id);
+      const [from, to] = a < b ? [a, b] : [b, a];
+      selectedIds = list.slice(from, to + 1).map((x) => x.id);
+    } else {
+      select(m.id);
+    }
+  }
+
+  // ---- Bulk actions (also used for a single message) ------------------------
+
+  /** Moves the selected messages away (archive, delete, folder…) with an Undo that puts each back. */
+  async function bulkMove(action, label, undoable = true, only = null) {
+    const msgs = only ?? (multi ? selectedMsgs : selected ? [selected] : []);
+    if (!msgs.length) return;
+    const ids = msgs.map((m) => m.id);
+    const origins = Object.groupBy ? Object.groupBy(msgs, (m) => m.folder_id) : groupBy(msgs, (m) => m.folder_id);
+    const accountsTouched = [...new Set(msgs.map((m) => m.account_id))];
+    for (const id of ids) dropFromList(id);
+    selectedIds = selectedId ? [selectedId] : [];
+    const ok = await act(() => action(ids));
+    accountsTouched.forEach(refreshFolders);
+    if (!ok) return !searching && folder && refreshList();
+    const text = `${label}${ids.length > 1 ? ` ${ids.length} messages` : ""}`;
+    if (!undoable) return flash(text);
+    flash(text, async () => {
+      for (const [folderId, group] of Object.entries(origins)) {
+        await act(() => api.moveToFolder(group.map((m) => m.id), Number(folderId)));
+      }
+      accountsTouched.forEach(refreshFolders);
+      if (!searching && folder) refreshList();
+    });
+  }
+
+  function groupBy(items, key) {
+    return items.reduce((out, x) => ((out[key(x)] ??= []).push(x), out), {});
+  }
+
+  async function bulkFlag(flag, on) {
+    const msgs = multi ? selectedMsgs : selected ? [selected] : [];
+    if (!msgs.length) return;
+    if (!(await act(() => api.setFlag(msgs.map((m) => m.id), flag, on)))) return;
+    for (const m of msgs) flag === "S" ? (m.unread = !on) : (m.starred = on);
+    new Set(msgs.map((m) => m.account_id)).forEach(refreshFolders);
+  }
+
+  function openMove() {
+    const msgs = multi ? selectedMsgs : selected ? [selected] : [];
+    const owners = new Set(msgs.map((m) => m.account_id));
+    if (!msgs.length) return;
+    if (owners.size > 1) return flash("Pick messages from one account to move them to a folder.");
+    moving = { accountId: msgs[0].account_id, folderId: msgs.length === 1 ? msgs[0].folder_id : null, count: msgs.length };
+  }
+
+  function moveToPicked(f) {
+    moving = null;
+    bulkMove((ids) => api.moveToFolder(ids, f.id), `Moved to ${f.name}:`);
+  }
+
+  // ---- Drag messages onto a folder -------------------------------------------
+
+  function dragRows(event, m) {
+    // Dragging a selected message drags the whole selection; any other row drags just itself.
+    const ids = selectedIds.includes(m.id) ? selectedIds : [m.id];
+    event.dataTransfer.setData("application/x-oxymail", JSON.stringify({ ids, account: m.account_id }));
+    event.dataTransfer.effectAllowed = "move";
+  }
+
+  let dropTarget = $state(null);
+
+  function dropOnFolder(event, f) {
+    dropTarget = null;
+    const data = event.dataTransfer.getData("application/x-oxymail");
+    if (!data) return;
+    const { ids, account } = JSON.parse(data);
+    if (account !== f.account_id) return flash("Messages can only be dropped on folders of their own account.");
+    const msgs = list.filter((m) => ids.includes(m.id));
+    bulkMove((moved) => api.moveToFolder(moved, f.id), `Moved to ${f.name}:`, true, msgs);
+  }
+
+  // ---- Reader extras ----------------------------------------------------------
+
+  async function allowSender() {
+    if (!view?.from_addr) return;
+    await act(() => api.setImagesAllowed(view.from_addr, true));
+    view.images_allowed = true;
+  }
+
+  function unsubscribe() {
+    const web = view.unsubscribe.find((u) => u.startsWith("http"));
+    const mail = view.unsubscribe.find((u) => u.startsWith("mailto:"));
+    if (web) {
+      if (confirm("Open the sender's unsubscribe page in your browser?")) act(() => api.openUrl(web));
+    } else if (mail) {
+      const m = parseMailto(mail);
+      composing = { account_id: sendingAccount(selected), to: m.to, subject: m.subject || "Unsubscribe", note: "This is the sender's unsubscribe address." };
+    }
+  }
+
   function dropFromList(id) {
     const i = list.findIndex((m) => m.id === id);
     if (i < 0) return;
     list = list.filter((m) => m.id !== id);
+    selectedIds = selectedIds.filter((x) => x !== id);
     if (selectedId === id) {
       const next = list[i] ?? list[i - 1];
       if (next) select(next.id);
@@ -398,6 +525,11 @@
       }
       return;
     }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a" && list.length) {
+      event.preventDefault();
+      selectedIds = list.map((m) => m.id);
+      return;
+    }
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     const i = list.findIndex((m) => m.id === selectedId);
     const keys = {
@@ -408,14 +540,15 @@
       e: () => (selectedRole === "archive" ? moveToInbox() : archive()),
       Delete: () => remove(),
       "#": () => remove(),
-      s: () => toggleStar(),
-      u: () => toggleRead(),
+      s: () => (multi ? bulkFlag("F", !selectedMsgs.every((m) => m.starred)) : toggleStar()),
+      u: () => (multi ? bulkFlag("S", selectedMsgs.some((m) => m.unread)) : toggleRead()),
+      v: () => openMove(),
       "/": () => searchInput?.focus(),
       c: () => compose(),
       r: () => reply(false),
       a: () => reply(true),
       f: () => forward(),
-      Escape: () => searching && clearSearch(),
+      Escape: () => (multi ? (selectedIds = selectedId ? [selectedId] : []) : searching && clearSearch()),
     };
     const fn = keys[event.key];
     if (fn) {
@@ -480,7 +613,13 @@
     </div>
     <form class="search" onsubmit={runSearch}>
       <Icon name="search" size={15} />
-      <input bind:this={searchInput} type="search" placeholder="Search all mail" bind:value={query} />
+      <input
+        bind:this={searchInput}
+        type="search"
+        placeholder="Search all mail"
+        title="Filters: from:  to:  subject:  has:attachment  is:unread  is:starred  in:sent  account:oxydev  before:2025-01-01  after:…"
+        bind:value={query}
+      />
       {#if searching}
         <button type="button" class="clear" onclick={clearSearch} title="Clear search"><Icon name="x" size={14} /></button>
       {/if}
@@ -536,7 +675,15 @@
         </div>
         <nav class="folders">
           {#each folders as f (f.id)}
-            <button class="folder" class:active={f.id === folder?.id && !searching} onclick={() => openFolder(f)}>
+            <button
+              class="folder"
+              class:active={f.id === folder?.id && !searching}
+              class:drop={dropTarget === f.id}
+              onclick={() => openFolder(f)}
+              ondragover={(e) => { e.preventDefault(); dropTarget = f.id; }}
+              ondragleave={() => dropTarget === f.id && (dropTarget = null)}
+              ondrop={(e) => { e.preventDefault(); dropOnFolder(e, f); }}
+            >
               <Icon name={folderIcon(f.role)} size={15} />
               <span class="ellipsis">{f.name}</span>
               {#if showUnread(f)}<span class="count">{f.unread.toLocaleString()}</span>{/if}
@@ -569,8 +716,15 @@
       </div>
       <div class="list" onscroll={onListScroll}>
         {#each list as m (m.id)}
-          <div class="row" class:selected={m.id === selectedId} class:unread={m.unread}>
-            <button class="row-main" onclick={() => select(m.id)}>
+          <div
+            class="row"
+            class:selected={selectedIds.includes(m.id)}
+            class:unread={m.unread}
+            draggable="true"
+            ondragstart={(e) => dragRows(e, m)}
+            role="listitem"
+          >
+            <button class="row-main" onclick={(e) => rowClick(e, m)}>
               <div class="row-top">
                 <span class="ellipsis sender">{sender(m)}</span>
                 <span class="date">{shortDate(m.date)}</span>
@@ -622,6 +776,25 @@
             <button class="primary" onclick={runImport} disabled={importing}>{importing ? "Importing…" : "Import"}</button>
           </div>
         </div>
+      {:else if multi}
+        <div class="bulk">
+          <div class="bulk-count">{selectedIds.length} messages selected</div>
+          <div class="bulk-actions">
+            {#if selectedMsgs.every((m) => m.folder_role === "trash")}
+              <button onclick={() => restore()}><Icon name="restore" size={16} /><span>Restore</span></button>
+              <button class="danger" onclick={() => remove()}><Icon name="trash" size={16} /><span>Delete forever</span></button>
+            {:else}
+              <button onclick={() => archive()}><Icon name="archive" size={16} /><span>Archive</span></button>
+              <button onclick={() => remove()}><Icon name="trash" size={16} /><span>Delete</span></button>
+            {/if}
+            <button onclick={openMove}><Icon name="folder" size={16} /><span>Move to…</span></button>
+            <button onclick={() => bulkFlag("S", true)}><Icon name="open" size={16} /><span>Mark read</span></button>
+            <button onclick={() => bulkFlag("S", false)}><Icon name="mail" size={16} /><span>Mark unread</span></button>
+            <button onclick={() => bulkFlag("F", !selectedMsgs.every((m) => m.starred))}><Icon name="star" size={16} /><span>{selectedMsgs.every((m) => m.starred) ? "Unstar" : "Star"}</span></button>
+          </div>
+          <button class="link" onclick={() => (selectedIds = selectedId ? [selectedId] : [])}>Clear selection</button>
+          <p class="bulk-hint">Ctrl-click adds or removes a message · Shift-click selects a range · Ctrl+A selects all loaded</p>
+        </div>
       {:else if view && selected}
         <div class="toolbar">
           <button onclick={() => reply(false)} title="Reply (r)"><Icon name="reply" size={16} /><span>Reply</span></button>
@@ -639,11 +812,12 @@
             {/if}
             <button onclick={() => remove()} title="Delete (Del)"><Icon name="trash" size={16} /><span>Delete</span></button>
           {/if}
+          <button class="secondary" onclick={openMove} title="Move to folder (v)"><Icon name="folder" size={16} /><span>Move</span></button>
           <span class="sep"></span>
-          <button class:starred={selected.starred} onclick={() => toggleStar()} title="Star (s)">
+          <button class="secondary" class:starred={selected.starred} onclick={() => toggleStar()} title="Star (s)">
             <Icon name="star" size={16} /><span>{selected.starred ? "Starred" : "Star"}</span>
           </button>
-          <button onclick={() => toggleRead()} title="Mark read or unread (u)">
+          <button class="secondary" onclick={() => toggleRead()} title={selected.unread ? "Mark read (u)" : "Mark unread (u)"}>
             <Icon name={selected.unread ? "open" : "mail"} size={16} /><span>{selected.unread ? "Mark read" : "Mark unread"}</span>
           </button>
         </div>
@@ -653,23 +827,45 @@
             <div><span class="label">From</span><span class="value">{view.from.join(", ")}</span></div>
             {#if view.to.length}<div><span class="label">To</span><span class="value">{view.to.join(", ")}</span></div>{/if}
             {#if view.cc.length}<div><span class="label">Cc</span><span class="value">{view.cc.join(", ")}</span></div>{/if}
-            <div class="muted">{longDate(view.date)}</div>
+            <div class="muted date-line">
+              {longDate(view.date)}
+              {#if view.unsubscribe.length}
+                <button class="unsub" onclick={unsubscribe}>Unsubscribe</button>
+              {/if}
+            </div>
           </div>
           {#each view.notices as notice}<div class="notice">{notice}</div>{/each}
           {#if view.attachments.length}
             <div class="attachments">
               {#each view.attachments as a (a.index)}
-                <button class="chip" onclick={() => act(async () => flash(`Saved to ${await api.saveAttachment(view.id, a.index)}`))} title="Save to Downloads">
-                  <Icon name="clip" size={13} />
-                  <span class="ellipsis">{a.name}</span>
-                  <span class="muted">{formatSize(a.size)}</span>
-                </button>
+                <div class="chip">
+                  <button class="chip-open" onclick={() => act(() => api.openAttachment(view.id, a.index))} title="Open with the default app">
+                    <Icon name="clip" size={13} />
+                    <span class="ellipsis">{a.name}</span>
+                    <span class="muted">{formatSize(a.size)}</span>
+                  </button>
+                  <button class="chip-save" onclick={() => act(async () => flash(`Saved to ${await api.saveAttachment(view.id, a.index)}`))} title="Save to Downloads">
+                    <Icon name="download" size={14} />
+                  </button>
+                </div>
               {/each}
             </div>
           {/if}
         </header>
+        {#if view.has_remote_content && !view.images_allowed && !remoteAllowed}
+          <div class="remote-bar">
+            <span>Remote images blocked for privacy.</span>
+            <button onclick={() => (remoteAllowed = true)}>Load images</button>
+            {#if view.from_addr}<button onclick={allowSender} title={`Always load images from ${view.from_addr}`}>Always for this sender</button>{/if}
+          </div>
+        {/if}
         {#if view.html}
-          <iframe class="body-frame" title="Message" sandbox="allow-popups" srcdoc={messageDocument(view.html)}></iframe>
+          <iframe
+            class="body-frame"
+            title="Message"
+            sandbox="allow-popups"
+            srcdoc={messageDocument(view.html, remoteAllowed || view.images_allowed)}
+          ></iframe>
         {:else}
           <pre class="body-text">{view.text ?? ""}</pre>
         {/if}
@@ -691,6 +887,16 @@
     onclose={() => (showSettings = false)}
     onimported={loadAccounts}
     onaccountschanged={loadAccounts}
+  />
+{/if}
+
+{#if moving}
+  <MovePicker
+    accountId={moving.accountId}
+    currentFolderId={moving.folderId}
+    count={moving.count}
+    onpick={moveToPicked}
+    onclose={() => (moving = null)}
   />
 {/if}
 
@@ -839,6 +1045,11 @@
   .reader { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); container: reader / inline-size; }
   .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
   /* In a narrow reader the toolbar drops its labels and keeps the icons (titles still name them). */
+  /* Medium width: the less-used buttons drop their labels first. */
+  @container reader (max-width: 900px) {
+    .toolbar button.secondary span { display: none; }
+    .toolbar button.secondary { padding: 6px 8px; }
+  }
   @container reader (max-width: 640px) {
     .toolbar button span { display: none; }
     .toolbar button { padding: 6px 8px; }
@@ -854,7 +1065,25 @@
   .notice { margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-text); font-size: 13px; }
   .attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
   .chip .muted { white-space: nowrap; flex-shrink: 0; }
-  .chip { display: flex; align-items: center; gap: 7px; max-width: 300px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px; }
+  .chip-open { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 6px 4px 6px 10px; }
+  .chip-save { display: grid; place-items: center; padding: 6px 8px; border-left: 1px solid var(--border); color: var(--muted); }
+  .chip-save:hover { color: var(--accent); }
+  .date-line { display: flex; align-items: center; gap: 10px; }
+  .unsub { padding: 1px 8px; border: 1px solid var(--border); border-radius: 99px; font-size: 12px; color: var(--muted); }
+  .unsub:hover { border-color: var(--accent); color: var(--accent); }
+  .remote-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 8px 24px; border-bottom: 1px solid var(--border); background: var(--bg); font-size: 12px; color: var(--muted); }
+  .remote-bar button { padding: 3px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; color: var(--text); }
+  .remote-bar button:hover { border-color: var(--accent); color: var(--accent); }
+  .folder.drop { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .bulk { margin: auto; display: grid; justify-items: center; gap: 14px; padding: 24px; text-align: center; }
+  .bulk-count { font-size: 18px; font-weight: 650; }
+  .bulk-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; max-width: 520px; }
+  .bulk-actions button { display: flex; align-items: center; gap: 6px; padding: 7px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
+  .bulk-actions button:hover { border-color: var(--accent); color: var(--accent); }
+  .bulk-actions button.danger:hover { border-color: var(--danger); color: var(--danger); }
+  .bulk-hint { margin: 0; font-size: 12px; color: var(--faint); }
+  .link { color: var(--accent); font-size: 13px; }
+  .chip { display: flex; align-items: center; gap: 0; max-width: 320px; padding: 0 !important; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px; }
   .chip:hover { border-color: var(--accent); background: var(--accent-soft); }
   .body-frame { flex: 1; min-height: 0; width: 100%; border: 0; background: #fff; }
   .body-text { flex: 1; min-height: 0; margin: 0; padding: 20px 24px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 14px/1.5 ui-monospace, "Ubuntu Mono", monospace; user-select: text; }

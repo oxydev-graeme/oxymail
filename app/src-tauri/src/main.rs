@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use oxymail_core::{Account, AccountUpdate, Folder, ImportStats, MessageSummary, MessageView, Store};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 mod live;
 
@@ -129,6 +129,43 @@ fn unread_by_role(state: State<AppState>, role: String) -> Res<i64> {
 }
 
 #[tauri::command]
+fn set_images_allowed(state: State<AppState>, email: String, allowed: bool) -> Res<()> {
+    state.0.lock().map_err(err)?.set_images_allowed(&email, allowed).map_err(err)
+}
+
+/// Opens a web link in the system browser. Only http(s) URLs are accepted.
+#[tauri::command]
+fn open_url(url: String) -> Res<()> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only web links can be opened".into());
+    }
+    open_external(&url)
+}
+
+/// Writes an attachment to a private temporary folder and opens it with the default app.
+#[tauri::command]
+fn open_attachment(state: State<AppState>, id: i64, index: usize) -> Res<String> {
+    let (name, data) = state.0.lock().map_err(err)?.attachment(id, index).map_err(err)?;
+    let dir = std::env::temp_dir().join(format!("oxymail-{}", std::process::id())).join(format!("{id}-{index}"));
+    std::fs::create_dir_all(&dir).map_err(err)?;
+    let safe: String = name.chars().map(|c| if c == '/' || c == '\\' { '_' } else { c }).collect();
+    let path = dir.join(if safe.is_empty() { "attachment".to_string() } else { safe });
+    std::fs::write(&path, data).map_err(err)?;
+    open_external(&path.to_string_lossy())?;
+    Ok(path.display().to_string())
+}
+
+fn open_external(target: &str) -> Res<()> {
+    #[cfg(target_os = "linux")]
+    let program = "xdg-open";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    std::process::Command::new(program).arg(target).spawn().map(|_| ()).map_err(err)
+}
+
+#[tauri::command]
 fn data_location() -> String {
     Store::default_path().display().to_string()
 }
@@ -151,6 +188,28 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .manage(live::SyncState::default())
         .setup(|app| {
+            // The main window is built here rather than in tauri.conf.json so links clicked in an
+            // email open in the browser (or, for mailto:, in Compose) instead of a new webview.
+            let handle = app.handle().clone();
+            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                .title("OxyMail")
+                .inner_size(1360.0, 860.0)
+                .min_inner_size(900.0, 560.0)
+                .decorations(false)
+                .on_new_window(move |url, _| {
+                    match url.scheme() {
+                        "http" | "https" => {
+                            let _ = open_external(url.as_str());
+                        }
+                        "mailto" => {
+                            let _ = handle.emit("compose-mailto", url.as_str());
+                        }
+                        _ => {}
+                    }
+                    tauri::webview::NewWindowResponse::Deny
+                })
+                .build()?;
+
             // Check every live account at start-up and then every few minutes.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -191,6 +250,9 @@ fn main() {
             live::connect_suggestion,
             live::connect_archive,
             suggest_contacts,
+            set_images_allowed,
+            open_url,
+            open_attachment,
             messages_by_role,
             unread_by_role,
             live::oauth_sign_in,
