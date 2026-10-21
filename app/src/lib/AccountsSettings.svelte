@@ -4,6 +4,7 @@
   import Icon from "./Icon.svelte";
   import SignatureEditor from "./SignatureEditor.svelte";
   import AddAccount from "./AddAccount.svelte";
+  import ServerFields from "./ServerFields.svelte";
 
   let { accounts, onchanged } = $props();
 
@@ -17,6 +18,11 @@
   let overIndex = $state(null);
   let message = $state("");
   let adding = $state(false);
+  let server = $state(null);
+  let newPassword = $state("");
+  let serverBusy = $state(false);
+  let serverMessage = $state("");
+  let serverOk = $state(false);
 
   $effect(() => {
     order = [...accounts];
@@ -60,6 +66,10 @@
       icon: account.icon ?? "",
     };
     message = "";
+    server = null;
+    newPassword = "";
+    serverMessage = "";
+    if (account.kind === "imap") api.liveConfig(account.id).then((c) => (server = c)).catch((e) => (serverMessage = String(e)));
   }
 
   async function pickIcon(event) {
@@ -83,6 +93,24 @@
       message = `Could not save: ${e}`;
     } finally {
       saving = false;
+    }
+  }
+
+  async function saveServer() {
+    serverBusy = true;
+    serverMessage = "";
+    try {
+      server.imap.port = Number(server.imap.port);
+      server.smtp.port = Number(server.smtp.port);
+      await api.updateServerSettings(editing.id, server, newPassword || null);
+      newPassword = "";
+      serverOk = true;
+      serverMessage = "Signed in to both servers. Settings saved.";
+    } catch (e) {
+      serverOk = false;
+      serverMessage = String(e);
+    } finally {
+      serverBusy = false;
     }
   }
 
@@ -145,8 +173,29 @@
   <div class="field">
     <span class="label">Signature</span>
     <SignatureEditor bind:value={draft.signature} />
-    <p class="hint">Added to new messages and replies from this account once sending arrives.</p>
+    <p class="hint">Added to new messages and replies from this account.</p>
   </div>
+
+  {#if editing.kind === "imap"}
+    <div class="field server">
+      <h3>Server settings</h3>
+      {#if server}
+        <ServerFields bind:config={server} />
+        <label class="password">
+          <span class="label">Password</span>
+          <input type="password" bind:value={newPassword} placeholder="Unchanged — saved in your keyring" />
+        </label>
+        <div class="server-actions">
+          <button class="ghost" onclick={saveServer} disabled={serverBusy}>
+            {serverBusy ? "Testing sign-in…" : "Test and save server settings"}
+          </button>
+          {#if serverMessage}<span class:ok={serverOk} class:bad={!serverOk}>{serverMessage}</span>{/if}
+        </div>
+      {:else if serverMessage}
+        <p class="bad">{serverMessage}</p>
+      {/if}
+    </div>
+  {/if}
 
   <div class="actions">
     <button class="primary" onclick={save} disabled={saving}>{saving ? "Saving…" : "Save"}</button>
@@ -223,6 +272,16 @@
   .badge { background: var(--accent-soft); color: var(--accent); }
   .badge.live { background: color-mix(in srgb, var(--amber) 18%, transparent); color: var(--warn-text); }
   .head { display: flex; align-items: center; justify-content: space-between; }
+  .server { padding-top: 16px; border-top: 1px solid var(--border); }
+  h3 { margin: 0 0 12px; font-size: 15px; }
+  .password { display: block; margin-top: 14px; }
+  .password input { width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); outline: none; }
+  .password input:focus { border-color: var(--accent); }
+  .server-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+  .ghost { padding: 7px 14px; border-radius: 8px; border: 1px solid var(--border); font-size: 13px; }
+  .ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .ok { color: var(--accent); font-size: 13px; }
+  .bad { color: var(--danger); font-size: 13px; user-select: text; }
   .tag { border: 1px solid var(--border); color: var(--muted); }
   .order { display: flex; gap: 1px; }
   .order button { width: 22px; height: 22px; border-radius: 4px; font-size: 9px; color: var(--muted); }

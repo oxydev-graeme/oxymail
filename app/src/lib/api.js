@@ -26,6 +26,9 @@ export const api = {
   addAccount: (config, password, senderName) => invoke("add_account", { config, password, senderName }),
   syncNow: (accountId = null) => invoke("sync_now", { accountId }),
   sendMessage: (accountId, mail) => invoke("send_message", { accountId, mail }),
+  liveConfig: (accountId) => invoke("live_config", { accountId }),
+  updateServerSettings: (accountId, config, password) =>
+    invoke("update_server_settings", { accountId, config, password }),
 };
 
 /** Sidebar name for an account: its label, else its address. */

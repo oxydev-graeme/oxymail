@@ -199,7 +199,9 @@ fn main() {
             live::discover_account,
             live::add_account,
             live::sync_now,
-            live::send_message
+            live::send_message,
+            live::live_config,
+            live::update_server_settings
         ])
         .run(tauri::generate_context!())
         .expect("running OxyMail");

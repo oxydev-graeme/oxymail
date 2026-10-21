@@ -70,6 +70,36 @@ pub async fn add_account(
     Ok(id)
 }
 
+/// A live account's current server settings, for the edit form.
+#[tauri::command]
+pub fn live_config(state: State<'_, AppState>, account_id: i64) -> Res<AccountConfig> {
+    let store = state.0.lock().map_err(err)?;
+    let live = store.live_account(account_id).map_err(err)?.ok_or("not a live account")?;
+    config_of(&live.config)
+}
+
+/// Tests and saves new server settings, and a new password if one is given, then syncs.
+#[tauri::command]
+pub async fn update_server_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: i64,
+    config: AccountConfig,
+    password: Option<String>,
+) -> Res<()> {
+    let password = match password.filter(|p| !p.is_empty()) {
+        Some(p) => p,
+        None => secrets::password(&config.email).map_err(full)?,
+    };
+    imap::test_login(&config, &password).await.map_err(|e| format!("Incoming mail (IMAP): {}", full(e)))?;
+    smtp::test_login(&config, &password).await.map_err(|e| format!("Outgoing mail (SMTP): {}", full(e)))?;
+    secrets::save_password(&config.email, &password).map_err(full)?;
+    let json = serde_json::to_string(&config).map_err(err)?;
+    state.0.lock().map_err(err)?.set_live_config(account_id, &json).map_err(err)?;
+    tauri::async_runtime::spawn(async move { sync_accounts(app, Some(account_id)).await });
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn sync_now(app: AppHandle, account_id: Option<i64>) -> Res<()> {
     tauri::async_runtime::spawn(async move { sync_accounts(app, account_id).await });

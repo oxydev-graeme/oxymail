@@ -61,6 +61,12 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Replaces a live account's connection settings (JSON owned by the sync crate).
+    pub fn set_live_config(&self, id: i64, config: &str) -> Result<()> {
+        self.db.execute("update accounts set config = ?1 where id = ?2 and kind = 'imap'", params![config, id])?;
+        Ok(())
+    }
+
     pub fn live_account(&self, id: i64) -> Result<Option<LiveAccount>> {
         Ok(self.live_accounts()?.into_iter().find(|a| a.id == id))
     }

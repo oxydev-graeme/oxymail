@@ -44,7 +44,11 @@ const mock = () => {
   const handlers = {
     accounts: () => accounts, folders: ({ accountId }) => folders(accountId), messages: ({ folderId, offset }) => (offset ? [] : msgs(folderId)),
     message: ({ id }) => view(id), settings: () => settings, set_setting: () => null, data_location: () => "/home/graeme/.local/share/oxymail/oxymail.db",
-    search: () => [], set_flag: () => null, "plugin:event|listen": () => 1, "plugin:event|unlisten": () => null,
+    search: () => [], set_flag: () => null,
+    live_config: () => ({ email: "graeme@oxydev.co.za", username: "graeme@oxydev.co.za", source: "the provider's autoconfig", oauth: null,
+      imap: { host: "mail.oxydev.co.za", port: 993, security: "tls" }, smtp: { host: "mail.oxydev.co.za", port: 465, security: "tls" } }),
+    discover_account: ({ email }) => ({ email, username: email, source: "Mozilla's ISP database (via MX)", oauth: "google",
+      imap: { host: "imap.gmail.com", port: 993, security: "tls" }, smtp: { host: "smtp.gmail.com", port: 465, security: "tls" } }), "plugin:event|listen": () => 1, "plugin:event|unlisten": () => null,
   };
   let cb = 0;
   window.__TAURI_INTERNALS__ = {
@@ -69,6 +73,16 @@ const shots = [
   }],
   ["settings-accounts", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")'); }],
   ["settings-900", 900, 600, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")'); }],
+  ["edit-live-account", 1360, 860, "dark", async (p) => {
+    await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")');
+    await p.locator(".accounts li", { hasText: "graeme@oxydev.co.za" }).locator("button.edit").click();
+    await p.waitForTimeout(200); await p.locator(".content").evaluate((el) => (el.scrollTop = 520));
+  }],
+  ["add-account-gmail", 1360, 860, "dark", async (p) => {
+    await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")');
+    await p.click('.dialog button:text-is("Add account")'); await p.fill('input[type="email"]', "hello@oxyaccounting.co.za");
+    await p.click('.dialog button:text-is("Continue")'); await p.click('.dialog button:text-is("Edit server settings")');
+  }],
   ["compose", 1360, 860, "dark", async (p) => { await p.click(".row-main"); await p.click("button:has-text('Reply all')"); }],
 ];
 for (const [name, w, h, theme, act] of shots) {

@@ -1,5 +1,6 @@
 <script>
   import { api } from "./api.js";
+  import ServerFields from "./ServerFields.svelte";
 
   /** Focuses the first empty field when each step appears. */
   function focusFirst(node) {
@@ -99,22 +100,7 @@
       {showAdvanced ? "Hide" : "Edit"} server settings
     </button>
     {#if showAdvanced}
-      <div class="advanced">
-        <label class="wide"><span class="label">Username</span><input bind:value={config.username} /></label>
-        {#each [["imap", "Incoming (IMAP)"], ["smtp", "Outgoing (SMTP)"]] as [key, title]}
-          <div class="server">
-            <span class="label">{title}</span>
-            <div class="row">
-              <input class="host" bind:value={config[key].host} />
-              <input class="port" type="number" bind:value={config[key].port} />
-              <select bind:value={config[key].security}>
-                <option value="tls">TLS</option>
-                <option value="starttls">STARTTLS</option>
-              </select>
-            </div>
-          </div>
-        {/each}
-      </div>
+      <div class="advanced"><ServerFields bind:config /></div>
     {/if}
 
     {#if error}<p class="error">{error}</p>{/if}
@@ -135,7 +121,7 @@
   .label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
   .hint { margin: 6px 0 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
   .muted { color: var(--muted); font-size: 12px; }
-  input, select {
+  input {
     width: 100%;
     padding: 7px 10px;
     border: 1px solid var(--border);
@@ -144,7 +130,7 @@
     color: var(--text);
     outline: none;
   }
-  input:focus, select:focus { border-color: var(--accent); }
+  input:focus { border-color: var(--accent); }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
   .found { padding: 10px 12px; border-radius: 8px; background: var(--accent-soft); font-size: 13px; }
   .note { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: var(--warn-bg); color: var(--warn-text); font-size: 13px; line-height: 1.5; }
@@ -154,9 +140,5 @@
   .primary:disabled { opacity: 0.6; cursor: default; }
   .ghost { padding: 7px 14px; border-radius: 8px; border: 1px solid var(--border); font-size: 13px; }
   .link { margin-top: 12px; padding: 0; color: var(--accent); font-size: 13px; }
-  .advanced { display: grid; gap: 12px; margin-top: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
-  .row { display: flex; gap: 8px; }
-  .host { flex: 1; }
-  .port { width: 90px; }
-  .row select { width: 120px; }
+  .advanced { margin-top: 10px; }
 </style>
