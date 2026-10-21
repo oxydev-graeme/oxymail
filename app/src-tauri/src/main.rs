@@ -192,6 +192,99 @@ fn unschedule(state: State<AppState>, id: i64) -> Res<String> {
     Ok(draft)
 }
 
+// ---- Calendar and contacts -------------------------------------------------
+
+#[tauri::command]
+fn calendars(state: State<AppState>) -> Res<Vec<oxymail_core::Calendar>> {
+    state.0.lock().map_err(err)?.calendars().map_err(err)
+}
+
+#[tauri::command]
+fn create_calendar(state: State<AppState>, name: String, color: Option<String>) -> Res<i64> {
+    state.0.lock().map_err(err)?.create_calendar(&name, color.as_deref()).map_err(err)
+}
+
+#[tauri::command]
+fn update_calendar(state: State<AppState>, id: i64, name: String, color: String, visible: bool) -> Res<()> {
+    state.0.lock().map_err(err)?.update_calendar(id, &name, &color, visible).map_err(err)
+}
+
+#[tauri::command]
+fn delete_calendar(state: State<AppState>, id: i64) -> Res<()> {
+    state.0.lock().map_err(err)?.delete_calendar(id).map_err(err)
+}
+
+#[tauri::command]
+fn occurrences(state: State<AppState>, from: i64, to: i64) -> Res<Vec<oxymail_core::Occurrence>> {
+    state.0.lock().map_err(err)?.occurrences(from, to).map_err(err)
+}
+
+#[tauri::command]
+fn event(state: State<AppState>, id: i64) -> Res<oxymail_core::Event> {
+    state.0.lock().map_err(err)?.event(id).map_err(err)
+}
+
+#[tauri::command]
+fn save_event(state: State<AppState>, event: oxymail_core::Event) -> Res<i64> {
+    state.0.lock().map_err(err)?.save_event(&event).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn delete_event(state: State<AppState>, id: i64) -> Res<()> {
+    state.0.lock().map_err(err)?.delete_event(id).map_err(err)
+}
+
+#[tauri::command]
+fn people(state: State<AppState>, query: String) -> Res<Vec<oxymail_core::PersonSummary>> {
+    state.0.lock().map_err(err)?.people(&query).map_err(err)
+}
+
+#[tauri::command]
+fn person(state: State<AppState>, id: i64) -> Res<oxymail_core::Person> {
+    state.0.lock().map_err(err)?.person(id).map_err(err)
+}
+
+#[tauri::command]
+fn save_person(state: State<AppState>, person: oxymail_core::Person) -> Res<i64> {
+    state.0.lock().map_err(err)?.save_person(&person).map_err(err)
+}
+
+#[tauri::command]
+fn delete_person(state: State<AppState>, id: i64) -> Res<()> {
+    state.0.lock().map_err(err)?.delete_person(id).map_err(err)
+}
+
+/// Imports .ics/.vcf files, or every such file under a folder.
+#[tauri::command]
+fn import_pim(state: State<AppState>, paths: Vec<String>) -> Res<oxymail_core::PimImport> {
+    let mut store = state.0.lock().map_err(err)?;
+    let mut total = oxymail_core::PimImport::default();
+    for path in paths {
+        let path = expand_home(&path);
+        if path.is_dir() {
+            let s = store.import_pim_folder(&path).map_err(err)?;
+            total.calendars += s.calendars;
+            total.events += s.events;
+            total.people += s.people;
+        } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ics")) {
+            total.events += store.import_ics(&path).map_err(err)?.1;
+            total.calendars += 1;
+        } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("vcf")) {
+            total.people += store.import_vcf(&path).map_err(err)?;
+        } else {
+            return Err(format!("{} isn't a calendar (.ics) or contacts (.vcf) file", path.display()));
+        }
+    }
+    Ok(total)
+}
+
+fn expand_home(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(rest),
+        None => PathBuf::from(path),
+    }
+}
+
 #[tauri::command]
 fn thread(state: State<AppState>, id: i64) -> Res<Vec<MessageSummary>> {
     state.0.lock().map_err(err)?.thread(id).map_err(err)
@@ -233,6 +326,7 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState(Mutex::new(store)))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(live::SyncState::default())
         .setup(|app| {
             // The main window is built here rather than in tauri.conf.json so links clicked in an
@@ -306,6 +400,19 @@ fn main() {
             live::connect_archive,
             suggest_contacts,
             thread,
+            calendars,
+            create_calendar,
+            update_calendar,
+            delete_calendar,
+            occurrences,
+            event,
+            save_event,
+            delete_event,
+            people,
+            person,
+            save_person,
+            delete_person,
+            import_pim,
             snooze,
             snoozed,
             scheduled,

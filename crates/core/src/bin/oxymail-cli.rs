@@ -16,6 +16,16 @@ fn main() -> Result<()> {
             let stats = store.import_archive(root.as_ref(), |n| eprintln!("{n} indexed"))?;
             println!("{}", serde_json::to_string_pretty(&stats)?);
         }
+        Some("import-pim") => {
+            let Some(dir) = args.get(1) else { bail!("usage: oxymail-cli import-pim <folder with .ics/.vcf files>") };
+            println!("{}", serde_json::to_string_pretty(&store.import_pim_folder(dir.as_ref())?)?);
+        }
+        Some("events") => {
+            let (from, to): (i64, i64) = (args[1].parse()?, args[2].parse()?);
+            for o in store.occurrences(from, to)? {
+                println!("{} {:>5}  {}", o.start, if o.all_day { "all" } else { "" }, o.summary);
+            }
+        }
         Some("backfill-threads") => {
             let n = store.backfill_threads(|n| eprintln!("{n} done"))?;
             println!("{n} messages given a conversation key");

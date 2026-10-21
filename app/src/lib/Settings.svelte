@@ -13,6 +13,23 @@
   let importing = $state(false);
   let importResult = $state("");
   let dataPath = $state("");
+  let pimPath = $state("~/MailbirdExport");
+  let pimBusy = $state(false);
+  let pimResult = $state("");
+
+  async function runPimImport() {
+    pimBusy = true;
+    pimResult = "";
+    try {
+      const r = await api.importPim([pimPath]);
+      pimResult = `Imported ${r.calendars} calendars with ${r.events.toLocaleString()} events, and ${r.people.toLocaleString()} new contacts.`;
+      onimported();
+    } catch (e) {
+      pimResult = `Import failed: ${e}`;
+    } finally {
+      pimBusy = false;
+    }
+  }
 
   onMount(async () => {
     dataPath = await api.dataLocation();
@@ -151,6 +168,15 @@
             imported are skipped, and a removed account comes back with its stars and folders.
           </p>
           {#if importResult}<p class="result">{importResult}</p>{/if}
+        </div>
+        <div class="field">
+          <div class="label">Calendars and contacts</div>
+          <div class="row">
+            <input bind:value={pimPath} />
+            <button class="primary" onclick={runPimImport} disabled={pimBusy}>{pimBusy ? "Importing…" : "Import"}</button>
+          </div>
+          <p class="hint">A .ics or .vcf file, or a folder of them, such as the Mailbird export. Importing again updates what's there.</p>
+          {#if pimResult}<p class="result">{pimResult}</p>{/if}
         </div>
         <div class="field">
           <div class="label">Index location</div>

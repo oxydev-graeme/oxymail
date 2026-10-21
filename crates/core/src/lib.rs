@@ -13,6 +13,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 mod live;
+mod pim;
+pub use pim::{Attendee, Calendar, Event, Occurrence, Person, PersonField, PersonSummary, PimImport};
 pub use live::{LiveAccount, MailbirdServer, RemoteFolder, RemoteRef};
 
 const SCHEMA: &str = "
@@ -1114,6 +1116,7 @@ fn migrate(db: &Connection) -> Result<()> {
         tx.commit()?;
     }
     db.execute_batch(SCHEMA)?;
+    db.execute_batch(pim::PIM_SCHEMA)?;
     let existing: Vec<String> = db
         .prepare("select name from pragma_table_info('accounts')")?
         .query_map([], |r| r.get(0))?

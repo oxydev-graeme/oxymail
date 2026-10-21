@@ -9,6 +9,9 @@
   import Compose from "./lib/Compose.svelte";
   import MovePicker from "./lib/MovePicker.svelte";
   import TimeMenu from "./lib/TimeMenu.svelte";
+  import CalendarView from "./lib/CalendarView.svelte";
+  import ContactsView from "./lib/ContactsView.svelte";
+  import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 
   const PAGE = 200;
   const appWindow = getCurrentWindow();
@@ -23,6 +26,57 @@
 
   let account = $derived(accounts.find((a) => a.id === accountId) ?? null);
   let allInboxUnread = $derived(accounts.reduce((n, a) => n + a.unread, 0));
+  /** Which part of the app is showing: mail, calendar or contacts. */
+  let mode = $state("mail");
+  let calendarList = $state([]);
+
+  async function refreshCalendars() {
+    calendarList = await api.calendars().catch(() => []);
+  }
+
+  async function toggleCalendar(c) {
+    await act(() => api.updateCalendar(c.id, c.name, c.color, !c.visible));
+    refreshCalendars();
+  }
+
+  async function newCalendar() {
+    const name = prompt("Name for the new calendar");
+    if (name?.trim()) {
+      await act(() => api.createCalendar(name.trim()));
+      refreshCalendars();
+    }
+  }
+
+  async function importFiles(kind) {
+    const filters = kind === "calendar" ? [{ name: "Calendars", extensions: ["ics"] }] : [{ name: "Contacts", extensions: ["vcf"] }];
+    const picked = await openFileDialog({ multiple: true, filters }).catch(() => null);
+    const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
+    if (!paths.length) return;
+    try {
+      const r = await api.importPim(paths);
+      flash(kind === "calendar" ? `Imported ${r.events.toLocaleString()} events` : `Imported ${r.people.toLocaleString()} contacts`);
+      refreshCalendars();
+      contactsKey++;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  /** Remounts the contacts view after an import so it reloads. */
+  let contactsKey = $state(0);
+
+  function composeTo(email, name) {
+    mode = "mail";
+    const to = name && name !== email ? `${name.replace(/[<>",]/g, "")} <${email}>` : email;
+    composing = { account_id: liveAccounts[0]?.id, to };
+  }
+
+  function searchFor(q) {
+    mode = "mail";
+    query = q;
+    runSearch();
+  }
+
   let drafts = $state([]);
   let snoozedList = $state([]);
   let scheduledList = $state([]);
@@ -208,6 +262,7 @@
     }
     await loadAccounts();
     refreshDrafts();
+    refreshCalendars();
     refreshQueues();
     listen("scheduled-changed", refreshQueues);
 
@@ -412,7 +467,8 @@
   }
 
   async function runSearch(event) {
-    event.preventDefault();
+    event?.preventDefault();
+    mode = "mail";
     if (!query.trim()) return clearSearch();
     searching = true;
     loadingList = true;
@@ -665,7 +721,7 @@
   }
 
   function onKey(event) {
-    if (showSettings || composing || snoozing || moving) return;
+    if (showSettings || composing || snoozing || moving || mode !== "mail") return;
     if (event.target instanceof HTMLInputElement) {
       if (event.key === "Escape") {
         event.target.blur();
@@ -793,6 +849,36 @@
 
   <div class="shell">
     <aside class="sidebar">
+      <div class="modes" role="tablist">
+        {#each [["mail", "mailbox", "Mail"], ["calendar", "calendar", "Calendar"], ["contacts", "contacts", "Contacts"]] as [id, icon, label]}
+          <button role="tab" aria-selected={mode === id} class:on={mode === id} onclick={() => (mode = id)} title={label}>
+            <Icon name={icon} size={16} /><span>{label}</span>
+          </button>
+        {/each}
+      </div>
+      {#if mode === "calendar"}
+        <div class="section">Calendars</div>
+        <nav class="calendars">
+          {#each calendarList as c (c.id)}
+            <label class="cal-row" title={`${c.events.toLocaleString()} events`}>
+              <input type="checkbox" checked={c.visible} onchange={() => toggleCalendar(c)} style:accent-color={c.color} />
+              <span class="cal-dot" style:background={c.color}></span>
+              <span class="ellipsis">{c.name}</span>
+            </label>
+          {:else}
+            <p class="side-hint">No calendars yet.</p>
+          {/each}
+        </nav>
+        <div class="side-actions">
+          <button onclick={newCalendar}><Icon name="plus" size={14} /> New calendar</button>
+          <button onclick={() => importFiles("calendar")}><Icon name="download" size={14} /> Import .ics…</button>
+        </div>
+      {:else if mode === "contacts"}
+        <div class="side-actions top">
+          <button onclick={() => importFiles("contacts")}><Icon name="download" size={14} /> Import .vcf…</button>
+        </div>
+        <p class="side-hint">People you add here come first when you type an address in Compose.</p>
+      {:else}
       <nav class="accounts unified">
         <div class="account" class:active={folder?.unified && !searching}>
           <button class="account-main" onclick={openAllInboxes}>
@@ -886,8 +972,16 @@
           {/if}
         </div>
       {/if}
+      {/if}
     </aside>
 
+    {#if mode === "calendar"}
+      <div class="mode-pane"><CalendarView calendars={calendarList} onchanged={refreshCalendars} /></div>
+    {:else if mode === "contacts"}
+      {#key contactsKey}
+        <div class="mode-pane"><ContactsView oncompose={composeTo} onsearch={searchFor} /></div>
+      {/key}
+    {:else}
     <section class="list-pane">
       <div class="list-title">
         <span class="ellipsis">{searching ? `Results for “${query}”` : (folder?.name ?? "")}</span>
@@ -1091,6 +1185,7 @@
         </div>
       {/if}
     </main>
+    {/if}
   </div>
 </div>
 
@@ -1198,6 +1293,21 @@
   }
 
   /* ---- Sidebar ---- */
+  .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; margin: 10px 8px 0; padding: 3px; border-radius: 9px; background: var(--hover); }
+  .modes button { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 2px 5px; border-radius: 7px; font-size: 11px; color: var(--muted); }
+  .modes button:hover { color: var(--text); }
+  .modes button.on { background: var(--panel); color: var(--accent); font-weight: 600; box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); }
+  .calendars { padding: 0 8px; }
+  .cal-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+  .cal-row:hover { background: var(--hover); }
+  .cal-row input { margin: 0; }
+  .cal-dot { width: 9px; height: 9px; border-radius: 3px; flex-shrink: 0; }
+  .side-actions { display: grid; gap: 4px; padding: 10px 8px; border-top: 1px solid var(--border); margin-top: 8px; }
+  .side-actions.top { border-top: 0; margin-top: 4px; }
+  .side-actions button { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; font-size: 13px; color: var(--muted); text-align: left; }
+  .side-actions button:hover { background: var(--hover); color: var(--text); }
+  .side-hint { margin: 4px 16px; font-size: 12px; color: var(--faint); line-height: 1.5; }
+  .mode-pane { grid-column: 2 / 4; min-width: 0; min-height: 0; }
   .sidebar { overflow-y: auto; background: var(--sidebar); border-right: 1px solid var(--border); min-width: 0; min-height: 0; padding-bottom: 12px; }
   .section { padding: 12px 16px 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
   .folders-head { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 12px; display: flex; }

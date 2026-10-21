@@ -59,6 +59,35 @@ const mock = () => {
     snoozed: () => msgs(100).slice(0, 3).map((m, k) => ({ ...m, snoozed_until: now + (k + 1) * 86400 })),
     scheduled: () => [{ id: 1, account_id: 9, send_at: now + 7200, mail: "{}", draft: "{}", summary: "darin@example.com — Bay Solar proposal", error: null }],
     drafts: () => [{ id: 1, account_id: 9, subject: "Quote for Bay Solar", recipients: "darin@example.com", body: "{}", updated: now - 600 }],
+    calendars: () => [
+      { id: 1, name: "Calendar", color: "#0e7490", visible: true, events: 120 },
+      { id: 2, name: "Family", color: "#7c3aed", visible: true, events: 40 },
+      { id: 3, name: "Holidays in South Africa", color: "#c2410c", visible: true, events: 250 },
+      { id: 4, name: "TFM OOO Calendar", color: "#15803d", visible: false, events: 30 },
+    ],
+    occurrences: () => {
+      const day = (offset, h, m = 0) => { const d = new Date(); d.setDate(d.getDate() + offset); d.setHours(h, m, 0, 0); return Math.floor(d / 1000); };
+      const allDay = (offset) => { const d = new Date(); d.setDate(d.getDate() + offset); return Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 1000); };
+      const ev = (id, cal, color, summary, start, end, all_day = false, recurring = false) => ({ event_id: id, calendar_id: cal, color, summary, location: id === 2 ? "Teams" : null, start, end, all_day, recurring, cancelled: false });
+      return [
+        ev(1, 3, "#c2410c", "Heritage Day", allDay(3), allDay(4), true),
+        ev(2, 1, "#0e7490", "Weekly Web Team Huddle", day(0, 9), day(0, 9, 30), false, true),
+        ev(3, 1, "#0e7490", "TFM x Konala: Weekly Check-In", day(0, 13), day(0, 14), false, true),
+        ev(4, 2, "#7c3aed", "Swimming lessons", day(0, 17), day(0, 18), false, true),
+        ev(5, 1, "#0e7490", "Bay Solar proposal review", day(1, 10), day(1, 11)),
+        ev(6, 2, "#7c3aed", "Dinner with the Bosworths", day(2, 19), day(2, 21)),
+        ev(7, 1, "#0e7490", "Invoice run", day(-2, 8), day(-2, 9)),
+        ev(8, 1, "#0e7490", "Another meeting", day(0, 15), day(0, 16)),
+      ];
+    },
+    event: ({ id }) => ({ id, calendar_id: 1, summary: "Weekly Web Team Huddle", description: "Agenda in the shared doc.", location: "Teams", start: 0, end: 1800, all_day: false, rrule: "RRULE:FREQ=WEEKLY;BYDAY=TU", organizer: "Darin Halford <darin@halffull.com>", attendees: [{ name: "Graeme Bosworth", email: "g@x", status: "ACCEPTED" }, { name: null, email: "team@halffull.com", status: "NEEDS-ACTION" }], status: null }),
+    people: () => [
+      { id: 1, full_name: "Paul McCree", org: "Sarongi", email: "paul@sarongi.co.za", phone: "082-575-6646", photo: null },
+      { id: 2, full_name: "Louise Van Loggerenberg", org: null, email: null, phone: "082-857-7465", photo: null },
+      { id: 3, full_name: "Megan Bosworth", org: null, email: null, phone: "072-461-2141", photo: null },
+      { id: 4, full_name: "Monica Venter", org: "Euro Appliances", email: "monica@euroappliances.co.za", phone: null, photo: null },
+    ],
+    person: () => ({ id: 1, full_name: "Paul McCree", first_name: "Paul", last_name: "McCree", org: "Sarongi", title: "Director", notes: "Met at the Cape Town expo.", birthday: "1981-01-19", photo: null, groups: "Clients", fields: [{ kind: "email", label: "Home", value: "paul@sarongi.co.za" }, { kind: "phone", label: "Mobile", value: "082-575-6646" }, { kind: "url", label: "Home Page", value: "https://sarongi.co.za" }] }),
     oauth_clients: () => ({ google: { client_id: "1234-abc.apps.googleusercontent.com", has_secret: true }, microsoft: { client_id: "", has_secret: false } }),
     connect_suggestion: () => ({ email: "hello@oxydev.co.za", username: "hello@oxydev.co.za", oauth: null,
       source: "your Mailbird settings (POP3 there; OxyMail uses IMAP on the same server)",
@@ -131,6 +160,11 @@ const shots = [
   ["snoozed-view", 1360, 860, "dark", async (p) => { await p.click("button:has-text('Snoozed')"); await p.click(".row-main"); }],
   ["scheduled-view", 1360, 860, "light", async (p) => { await p.click("button:has-text('Scheduled')"); }],
   ["send-later", 1360, 860, "dark", async (p) => { await p.click(".compose-btn"); await p.fill("#compose-to", "darin@example.com"); await p.click("button:has-text('Send later')"); }],
+  ["calendar", 1360, 860, "dark", async (p) => { await p.click(".modes button:has-text('Calendar')"); await p.waitForTimeout(200); await p.locator(".agenda .item").first().click(); }],
+  ["calendar-light-900", 900, 600, "light", async (p) => { await p.click(".modes button:has-text('Calendar')"); }],
+  ["event-editor", 1360, 860, "dark", async (p) => { await p.click(".modes button:has-text('Calendar')"); await p.click("button:has-text('New event')"); }],
+  ["contacts", 1360, 860, "dark", async (p) => { await p.click(".modes button:has-text('Contacts')"); await p.click("li button >> nth=0"); }],
+  ["contact-edit", 1360, 860, "light", async (p) => { await p.click(".modes button:has-text('Contacts')"); await p.click("li button >> nth=0"); await p.click(".card button:has-text('Edit')"); }],
   ["shortcuts", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Shortcuts & search")'); await p.locator(".content").evaluate((el) => (el.scrollTop = 400)); }],
   ["add-account-gmail", 1360, 860, "dark", async (p) => {
     await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")');
