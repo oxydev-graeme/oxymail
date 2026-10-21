@@ -1,0 +1,46 @@
+# Tests the engine and checks the app compiles on Windows, macOS and Linux for every push, so a
+# platform-specific break shows up immediately rather than at release time.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Build the interface
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Test
+        run: cargo test -p oxymail-core -p oxymail-sync -p oxymail-mailbird-export
+
+      - name: Check the app compiles
+        run: cargo check -p oxymail-app

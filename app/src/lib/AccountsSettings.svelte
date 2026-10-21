@@ -292,7 +292,7 @@
         {:else}
           <label class="password">
             <span class="label">Password</span>
-            <input type="password" bind:value={newPassword} placeholder="Unchanged — saved in your keyring" />
+            <input type="password" bind:value={newPassword} placeholder="Unchanged — kept in secure storage" />
           </label>
         {/if}
         <div class="server-actions">

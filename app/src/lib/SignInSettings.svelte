@@ -32,7 +32,7 @@
 <p class="hint top">
   Google and Microsoft only let apps sign in to mail with their own registration. Create one once (free), paste
   its details here, and accounts on that provider can use <b>Sign in with Google / Microsoft</b> instead of app
-  passwords. Secrets are kept in your desktop keyring.
+  passwords. Secrets are kept in your system's secure storage.
 </p>
 
 {#if clients}

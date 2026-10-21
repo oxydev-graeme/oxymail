@@ -271,7 +271,7 @@ impl Store {
         for sub in ["cur", "new", "tmp"] {
             fs::create_dir_all(folder_dir.join(sub))?;
         }
-        let rel = format!("cur/{uid}.U{uid}.oxymail:2,{flags}");
+        let rel = format!("cur/{uid}.U{uid}.oxymail{}{flags}", crate::MAILDIR_INFO);
         fs::write(folder_dir.join(&rel), raw)?;
         let tx = self.db.transaction()?;
         let added = index_message(&tx, &MessageParser::default(), folder_id, &rel, raw, Some(uid))?.is_some();
@@ -459,8 +459,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let inbox = dir.join("export/mail/me@example.com/Inbox/cur");
         fs::create_dir_all(&inbox)?;
-        fs::write(inbox.join("1.M1.oxymail:2,S"), mail("old@x", "Old archived"))?;
-        fs::write(inbox.join("2.M2.oxymail:2,S"), mail("both@x", "On server too"))?;
+        fs::write(inbox.join(format!("1.M1.oxymail{}S", crate::MAILDIR_INFO)), mail("old@x", "Old archived"))?;
+        fs::write(inbox.join(format!("2.M2.oxymail{}S", crate::MAILDIR_INFO)), mail("both@x", "On server too"))?;
 
         let mut store = Store::open(&dir.join("t.db"))?;
         store.import_archive(&dir.join("export/mail"), |_| {})?;

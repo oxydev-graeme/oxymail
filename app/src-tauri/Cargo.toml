@@ -19,6 +19,8 @@ base64 = "0.23.1"
 tauri-plugin-dialog = "2.8.3"
 tauri-plugin-updater = "2.14.0"
 tauri-plugin-process = "2.4.0"
+dirs = "7.0.0"
+open = "5.4.4"
 
 # The binary name is the Wayland app id, which must match oxymail.desktop for the icon to show.
 [[bin]]

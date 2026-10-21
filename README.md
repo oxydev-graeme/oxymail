@@ -1,33 +1,43 @@
 # OxyMail
 
-A Linux-first desktop email client, built in Rust.
+*Email with room to breathe.* An email client with calendar and contacts for **Windows, macOS and Linux**, built in Rust with [Tauri](https://tauri.app).
 
-> **Status:** early discovery. There is no usable code yet.
+## Features
 
-## Goals
+- **Accounts:**
+  - several IMAP/SMTP accounts, with settings detected for you
+  - Google and Microsoft sign-in (OAuth), or app passwords
+  - passwords kept in the system's secure storage (Windows Credential Manager, macOS Keychain, Linux Secret Service)
+- **Mail:**
+  - all inboxes in one view
+  - push mail (IMAP IDLE)
+  - offline reading
+  - full-text search with filters (`from:` `has:attachment` `is:unread` `before:`…)
+  - conversations
+- **Organising:**
+  - archive, delete and move on the server, with Undo
+  - select several messages at once, or drag them to folders
+  - snooze
+  - mark all as read
+- **Writing:**
+  - rich text, signatures per account, attachments
+  - address autocomplete
+  - drafts that save themselves
+  - undo send, and send later
+- **Privacy:** remote images are blocked unless you allow them, message HTML is sandboxed, and there's a one-click unsubscribe.
+- **Calendar:** month view and agenda, repeating events, show or hide calendars, `.ics` import.
+- **Contacts:** address book with photos, `.vcf` import, Email and Show-emails shortcuts.
+- **Mailbird migration:** a lossless exporter, plus importing the archive with its account order, colours, signatures, contacts and calendars.
+- **Automatic updates** from signed GitHub releases.
 
-- Run well on Linux (developed on Zorin OS), with Windows and macOS later
-- Multiple accounts: IMAP/SMTP, Gmail and Microsoft 365 via OAuth2
-- A unified inbox, offline reading and fast full-text search
-- Keep mail in open formats (Maildir, vCard) so it never gets locked in
-- Import from Mailbird's local data store
+## Layout
 
-## Stack
-
-| Layer | Choice |
+| Path | What it is |
 | --- | --- |
-| Engine (sync, storage, search, import) | Rust |
-| App shell | [Tauri](https://tauri.app) |
-| UI | TypeScript (Svelte or SolidJS) |
-
-Main crates: `async-imap` / `imap-codec`, `lettre`, `mail-parser`, `mail-builder`, `oauth2`, `rusqlite`, `tantivy`.
-
-## Roadmap
-
-1. **Mailbird exporter:** read a copy of Mailbird's local store and export mail to Maildir/mbox, contacts to vCard, and signatures and settings to plain files
-2. **Engine:** account model, IMAP sync, local store
-3. **App:** message list and reader in a Tauri shell
-4. Compose and send, OAuth providers, search
+| `crates/core` | Local store: SQLite index with FTS5 search, Maildir cache, calendar and contacts |
+| `crates/sync` | IMAP sync and IDLE, SMTP, autoconfig, OAuth, secure credential storage |
+| `crates/mailbird-export` | Exports a Mailbird `Store` folder to Maildir, vCard and iCalendar |
+| `app/` | The Tauri app with a Svelte 5 interface |
 
 ## Clean-room notice
 
@@ -41,14 +51,17 @@ GPL-3.0. See [LICENSE](LICENSE).
 
 Download the latest release from [Releases](https://github.com/oxydev-graeme/oxymail/releases/latest):
 
-- **AppImage:** `chmod +x OxyMail_*.AppImage` and run it. It needs no installation.
-- **Debian/Ubuntu/Zorin:** `sudo apt install ./OxyMail_*_amd64.deb`
+| Platform | Download | Notes |
+| --- | --- | --- |
+| **Windows** 10/11 | `OxyMail_*_x64-setup.exe` (or `.msi`) | Installs for your user; no administrator rights needed |
+| **macOS** 11+ (Apple Silicon and Intel) | `OxyMail_*_universal.dmg` | Drag to Applications. The first time, right-click → Open (the app isn't notarised yet). |
+| **Linux** | `.AppImage`, `.deb` or `.rpm` | AppImage: `chmod +x` and run. Debian/Ubuntu/Zorin: `sudo apt install ./OxyMail_*.deb` |
 
-Both update themselves. OxyMail checks GitHub when it starts (Settings → About can turn this off) and installs only releases signed with the project's key.
+Every install updates itself. OxyMail checks GitHub when it starts (Settings → About can turn this off) and installs only releases signed with the project's key.
 
 ## Releasing
 
-`scripts/release.sh 0.2.1` bumps the version, tags and pushes. GitHub Actions (`.github/workflows/release.yml`) then builds the .deb and AppImage, signs them with the `TAURI_SIGNING_PRIVATE_KEY` secret and publishes them with `latest.json`, which installed copies read to update.
+`scripts/release.sh 0.2.1` bumps the version, tags and pushes. GitHub Actions (`.github/workflows/release.yml`) then builds on Windows, macOS and Linux in parallel, signs every installer with the `TAURI_SIGNING_PRIVATE_KEY` secret, and publishes them with `latest.json`, which installed copies read to update. `ci.yml` runs the tests on all three platforms on every push.
 
 ## Building
 

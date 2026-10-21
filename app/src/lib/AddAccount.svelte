@@ -100,7 +100,7 @@
       <input bind:value={senderName} placeholder="e.g. Graeme Bosworth" />
     </label>
     <p class="hint">
-      {useOAuth ? "The sign-in is kept in your desktop keyring." : "The password is kept in your desktop keyring, not in OxyMail's files."}
+      {useOAuth ? "The sign-in is kept in your system's secure storage." : "The password is kept in your system's secure storage (Keychain, Credential Manager or keyring), not in OxyMail's files."}
     </p>
 
     <button type="button" class="link" onclick={() => (showAdvanced = !showAdvanced)}>

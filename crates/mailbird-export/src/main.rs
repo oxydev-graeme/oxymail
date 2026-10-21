@@ -419,7 +419,9 @@ fn export_mail(db: &Connection, args: &Args) -> Result<BTreeMap<String, AccountS
         if is_read {
             flags.push('S');
         }
-        let file_name = format!("{}.M{id}.oxymail:2,{flags}", timestamp.unwrap_or(0).max(0));
+        // Windows forbids ':' in file names; Maildir tools use ';' there instead.
+        let info = if cfg!(windows) { ";2," } else { ":2," };
+        let file_name = format!("{}.M{id}.oxymail{info}{flags}", timestamp.unwrap_or(0).max(0));
 
         let account_dir = args.out.join("mail").join(sanitize(&username));
         let mut written: Option<PathBuf> = None;

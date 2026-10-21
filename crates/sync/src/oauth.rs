@@ -265,18 +265,7 @@ fn random_token(bytes: usize) -> Result<String> {
 }
 
 fn open_browser(url: &str) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    let mut command = std::process::Command::new("xdg-open");
-    #[cfg(target_os = "macos")]
-    let mut command = std::process::Command::new("open");
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", ""]);
-        c
-    };
-    command.arg(url).spawn().context("opening the web browser")?;
-    Ok(())
+    open::that_detached(url).context("opening the web browser")
 }
 
 /// The XOAUTH2 SASL string for IMAP and SMTP.

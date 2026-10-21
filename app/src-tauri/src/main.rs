@@ -48,7 +48,7 @@ fn message(state: State<AppState>, id: i64) -> Res<MessageView> {
 #[tauri::command]
 fn save_attachment(state: State<AppState>, id: i64, index: usize) -> Res<String> {
     let (name, data) = state.0.lock().map_err(err)?.attachment(id, index).map_err(err)?;
-    let dir = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("Downloads");
+    let dir = dirs::download_dir().or_else(|| dirs::home_dir().map(|h| h.join("Downloads"))).unwrap_or_default();
     std::fs::create_dir_all(&dir).map_err(err)?;
     let safe: String = name.chars().map(|c| if c == '/' || c == '\\' { '_' } else { c }).collect();
     let mut path = dir.join(&safe);
@@ -156,13 +156,7 @@ fn open_attachment(state: State<AppState>, id: i64, index: usize) -> Res<String>
 }
 
 fn open_external(target: &str) -> Res<()> {
-    #[cfg(target_os = "linux")]
-    let program = "xdg-open";
-    #[cfg(target_os = "macos")]
-    let program = "open";
-    #[cfg(target_os = "windows")]
-    let program = "explorer";
-    std::process::Command::new(program).arg(target).spawn().map(|_| ()).map_err(err)
+    open::that_detached(target).map_err(err)
 }
 
 #[tauri::command]
@@ -280,7 +274,7 @@ fn import_pim(state: State<AppState>, paths: Vec<String>) -> Res<oxymail_core::P
 
 fn expand_home(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(rest),
+        Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
         None => PathBuf::from(path),
     }
 }
@@ -313,7 +307,7 @@ fn data_location() -> String {
 #[tauri::command]
 fn import_archive(state: State<AppState>, path: String) -> Res<ImportStats> {
     let path = match path.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(rest),
+        Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
         None => PathBuf::from(path),
     };
     state.0.lock().map_err(err)?.import_archive(&path, |_| {}).map_err(err)

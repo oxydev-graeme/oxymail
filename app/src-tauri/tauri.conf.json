@@ -28,28 +28,39 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "deb",
-      "appimage"
-    ],
+    "targets": "all",
     "category": "Productivity",
-    "shortDescription": "Email client",
+    "shortDescription": "Email, calendar and contacts",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.png"
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
     ],
     "createUpdaterArtifacts": true,
     "publisher": "Oxydev",
     "homepage": "https://github.com/oxydev-graeme/oxymail",
-    "longDescription": "Email with room to breathe: a Linux-first email client with calendar and contacts.",
+    "longDescription": "Email with room to breathe: an email client with calendar and contacts for Windows, macOS and Linux.",
     "license": "GPL-3.0-only",
     "linux": {
       "deb": {
         "desktopTemplate": "oxymail.desktop",
         "section": "mail"
       }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
     }
   },
   "mainBinaryName": "oxymail",

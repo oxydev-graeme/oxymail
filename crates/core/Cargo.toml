@@ -8,6 +8,7 @@ anyhow = "1.0.104"
 base64 = "0.23.1"
 chrono = "0.4.45"
 chrono-tz = "0.10.4"
+dirs = "7.0.0"
 mail-parser = "0.11.9"
 rrule = "0.14.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }

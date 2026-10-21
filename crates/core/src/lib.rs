@@ -328,13 +328,10 @@ impl Store {
         Ok(Self { db })
     }
 
-    /// Default database location: `~/.local/share/oxymail/oxymail.db`.
+    /// Default database location, in the platform's data folder.
     pub fn default_path() -> PathBuf {
-        let base = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-            .unwrap_or_else(|| PathBuf::from("."));
-        base.join("oxymail").join("oxymail.db")
+        // ~/.local/share on Linux, %APPDATA% on Windows, ~/Library/Application Support on macOS.
+        dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("oxymail").join("oxymail.db")
     }
 
     /// Imports a tree laid out as `<root>/<account>/<folder>/{cur,new}` as read-only archive
@@ -1358,9 +1355,17 @@ fn folder_role(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Flags from a Maildir name such as `123.M45.oxymail:2,FS`.
+/// Separates a Maildir file name from its flags. Windows forbids `:` in file names, so there
+/// it is `;` (the convention Maildir tools use on Windows).
+pub const MAILDIR_INFO: &str = if cfg!(windows) { ";2," } else { ":2," };
+
+/// Flags from a Maildir name such as `123.M45.oxymail:2,FS` (also `;2,` and `!2,`).
 fn maildir_flags(file: &str) -> String {
-    file.rsplit_once(":2,").map(|(_, f)| f.to_string()).unwrap_or_default()
+    [":2,", ";2,", "!2,"]
+        .iter()
+        .find_map(|sep| file.rsplit_once(sep))
+        .map(|(_, f)| f.to_string())
+        .unwrap_or_default()
 }
 
 fn join_addresses(addr: Option<&mail_parser::Address>) -> String {
@@ -1482,6 +1487,7 @@ mod tests {
     #[test]
     fn flags_come_from_the_maildir_suffix() {
         assert_eq!(maildir_flags("cur/1.M2.oxymail:2,FS"), "FS");
+        assert_eq!(maildir_flags("cur/1.M2.oxymail;2,S"), "S");
         assert_eq!(maildir_flags("new/1.M2.oxymail"), "");
     }
 
@@ -1516,7 +1522,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("oxymail-test-{}", std::process::id()));
         let inbox = dir.join("mail/me@example.com/Inbox/cur");
         fs::create_dir_all(&inbox)?;
-        let file = inbox.join("1.M1.oxymail:2,S");
+        let file = inbox.join(format!("1.M1.oxymail{MAILDIR_INFO}S"));
         fs::write(&file, "From: A <a@example.com>\r\nSubject: Hi\r\nDate: Tue, 1 Jul 2025 10:00:00 +0000\r\n\r\nHello\r\n")?;
         let mut store = Store::open(&dir.join("test.db"))?;
         store.import_archive(&dir.join("mail"), |_| {})?;
