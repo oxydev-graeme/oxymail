@@ -9,7 +9,10 @@ data="${XDG_DATA_HOME:-$HOME/.local/share}"
 
 cd "$repo/app"
 [ -d node_modules ] || npm install
-CARGO_TARGET_DIR="$target" npx tauri build --no-bundle
+# Built without the Tauri CLI, which needs file watches that a busy desktop can run out of.
+# The custom-protocol feature is what `tauri build` adds: it embeds the built frontend.
+npm run build
+(cd "$repo" && CARGO_TARGET_DIR="$target" cargo build --release -p oxymail-app --features tauri/custom-protocol)
 
 install -Dm755 "$target/release/oxymail" "$HOME/.local/bin/oxymail"
 
