@@ -30,3 +30,4 @@ client_secret*.json
 # App
 app/dist/
 app/src-tauri/gen/
+app/screenshots/

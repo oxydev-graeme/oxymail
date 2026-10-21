@@ -195,7 +195,7 @@
 
 <style>
   h2 { margin: 0 0 6px; font-size: 17px; }
-  .top { margin-bottom: 12px; }
+  .hint.top { margin-bottom: 12px; }
   .hint { margin: 6px 0 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
   .label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
   .field { margin-top: 18px; }

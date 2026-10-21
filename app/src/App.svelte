@@ -473,7 +473,7 @@
       </nav>
       {#if account}
         <div class="section folders-head">
-          <span class="ellipsis">Folders · {accountLabel(account)}</span>
+          <span>Folders</span>
         </div>
         <nav class="folders">
           {#each folders as f (f.id)}
@@ -516,9 +516,9 @@
                 <span class="ellipsis sender">{sender(m)}</span>
                 <span class="date">{shortDate(m.date)}</span>
               </div>
-              <div class="row-subject ellipsis">
+              <div class="row-subject">
                 {#if m.attachments > 0}<span class="clip"><Icon name="clip" size={12} /></span>{/if}
-                {m.subject || "(no subject)"}
+                <span class="ellipsis">{m.subject || "(no subject)"}</span>
               </div>
               {#if settings.density !== "compact"}
                 <div class="row-snippet ellipsis">{m.snippet}</div>
@@ -705,6 +705,11 @@
   .divider { width: 1px; height: 18px; margin: 0 6px; background: var(--border); }
 
   .shell { display: grid; grid-template-columns: 250px 380px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); min-height: 0; }
+  /* Smaller windows: narrower sidebar and list so the reader keeps room. */
+  @media (max-width: 1180px) {
+    .shell { grid-template-columns: 220px 320px minmax(0, 1fr); }
+    .titlebar { grid-template-columns: 220px 320px 1fr auto; }
+  }
 
   /* ---- Sidebar ---- */
   .sidebar { overflow-y: auto; background: var(--sidebar); border-right: 1px solid var(--border); min-width: 0; min-height: 0; padding-bottom: 12px; }
@@ -742,8 +747,9 @@
   .row-top { display: flex; justify-content: space-between; gap: 10px; }
   .sender { font-size: 13px; }
   .date { flex-shrink: 0; font-size: 12px; color: var(--muted); }
-  .row-subject { display: flex; align-items: center; gap: 4px; font-size: 13px; margin-top: 1px; }
-  .row-snippet { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .row-subject { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: 13px; margin-top: 1px; }
+  .clip { flex-shrink: 0; }
+  .row-snippet { font-size: 12px; color: var(--muted); margin-top: 2px; padding-right: 20px; }
   .row-folder { display: inline-block; margin-top: 4px; padding: 0 7px; border-radius: 99px; font-size: 11px; background: var(--accent-soft); color: var(--accent); }
   .clip { display: inline-flex; color: var(--muted); }
   .row-actions {
@@ -767,8 +773,13 @@
   .row:hover .star-pin { display: none; }
 
   /* ---- Reader ---- */
-  .reader { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); }
-  .toolbar { display: flex; align-items: center; gap: 2px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+  .reader { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); container: reader / inline-size; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+  /* In a narrow reader the toolbar drops its labels and keeps the icons (titles still name them). */
+  @container reader (max-width: 640px) {
+    .toolbar button span { display: none; }
+    .toolbar button { padding: 6px 8px; }
+  }
   .toolbar button { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 6px; font-size: 13px; color: var(--muted); }
   .toolbar button:hover { background: var(--hover); color: var(--text); }
   .toolbar button.danger:hover { color: var(--danger); }
@@ -779,6 +790,7 @@
   .label { display: inline-block; width: 42px; color: var(--muted); }
   .notice { margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-text); font-size: 13px; }
   .attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .chip .muted { white-space: nowrap; flex-shrink: 0; }
   .chip { display: flex; align-items: center; gap: 7px; max-width: 300px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px; }
   .chip:hover { border-color: var(--accent); background: var(--accent-soft); }
   .body-frame { flex: 1; min-height: 0; width: 100%; border: 0; background: #fff; }

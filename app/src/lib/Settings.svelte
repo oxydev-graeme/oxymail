@@ -66,8 +66,11 @@
         <button class:active={section === id} onclick={() => (section = id)}>{label}</button>
       {/each}
     </nav>
-    <div class="content">
-      <button class="close" onclick={onclose} title="Close"><Icon name="x" /></button>
+    <div class="pane">
+      <div class="topbar">
+        <button class="close" onclick={onclose} title="Close (Esc)"><Icon name="x" /></button>
+      </div>
+      <div class="content">
 
       {#if section === "appearance"}
         <h2>Appearance</h2>
@@ -145,6 +148,7 @@
           <p class="hint">github.com/oxydev-graeme/oxymail</p>
         </div>
       {/if}
+      </div>
     </div>
   </div>
 </div>
@@ -160,7 +164,8 @@
   }
   .dialog {
     display: grid;
-    grid-template-columns: 180px 1fr;
+    grid-template-columns: 180px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     width: min(760px, 92vw);
     height: min(540px, 86vh);
     background: var(--panel);
@@ -187,8 +192,12 @@
   }
   nav button:hover { background: var(--border); color: var(--text); }
   nav button.active { background: var(--selected); color: var(--text); font-weight: 600; }
-  .content { position: relative; padding: 22px 28px; overflow-y: auto; }
-  .close { position: absolute; top: 14px; right: 14px; padding: 4px; border-radius: 6px; color: var(--muted); }
+  /* The close button lives in its own bar above the scrolling content, so section headers
+     (and their buttons) can never sit underneath it, and it stays put while scrolling. */
+  .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .topbar { display: flex; justify-content: flex-end; padding: 10px 10px 0; flex-shrink: 0; }
+  .content { flex: 1; min-height: 0; padding: 0 28px 24px; overflow-y: auto; }
+  .close { display: grid; place-items: center; padding: 4px; border-radius: 6px; color: var(--muted); }
   .close:hover { background: var(--bg); color: var(--text); }
   h2 { margin: 0 0 18px; font-size: 17px; }
   .field { margin-bottom: 20px; }
