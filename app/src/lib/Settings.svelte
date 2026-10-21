@@ -167,7 +167,7 @@
     grid-template-columns: 180px minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
     width: min(760px, 92vw);
-    height: min(540px, 86vh);
+    height: min(700px, 88vh);
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 12px;

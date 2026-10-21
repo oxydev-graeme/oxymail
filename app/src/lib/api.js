@@ -27,6 +27,8 @@ export const api = {
   syncNow: (accountId = null) => invoke("sync_now", { accountId }),
   sendMessage: (accountId, mail) => invoke("send_message", { accountId, mail }),
   liveConfig: (accountId) => invoke("live_config", { accountId }),
+  connectSuggestion: (accountId) => invoke("connect_suggestion", { accountId }),
+  connectArchive: (accountId, config, password) => invoke("connect_archive", { accountId, config, password }),
   updateServerSettings: (accountId, config, password) =>
     invoke("update_server_settings", { accountId, config, password }),
 };

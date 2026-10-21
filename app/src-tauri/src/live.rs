@@ -70,6 +70,58 @@ pub async fn add_account(
     Ok(id)
 }
 
+/// Suggested settings for connecting an imported account: the provider's published settings,
+/// overridden by what Mailbird was using. POP3 accounts are moved to IMAP on the same server.
+#[tauri::command]
+pub async fn connect_suggestion(state: State<'_, AppState>, account_id: i64) -> Res<AccountConfig> {
+    use oxymail_sync::autoconfig::{Security, Server};
+    let (email, mailbird) = {
+        let store = state.0.lock().map_err(err)?;
+        let email = store.accounts().map_err(err)?.into_iter().find(|a| a.id == account_id).ok_or("no such account")?.name;
+        (email, store.mailbird_server(account_id).map_err(err)?)
+    };
+    let mut config = autoconfig::discover(&email).await.map_err(full)?;
+    let Some(mb) = mailbird else { return Ok(config) };
+    let security = |tls: bool| if tls { Security::Tls } else { Security::StartTls };
+    match mb.kind.as_str() {
+        "exchange" => return Err("This was an Exchange account in Mailbird. OxyMail can't connect to Exchange yet.".into()),
+        "imap" => config.imap = Server { host: mb.host.clone(), port: mb.port, security: security(mb.tls) },
+        "pop3" => {
+            config.imap = Server { host: mb.host.clone(), port: 993, security: Security::Tls };
+            config.source = "your Mailbird settings (POP3 there; OxyMail uses IMAP on the same server)".into();
+        }
+        _ => {}
+    }
+    if let (Some(host), Some(port)) = (mb.smtp_host.clone(), mb.smtp_port) {
+        config.smtp = Server { host, port, security: security(mb.smtp_tls.unwrap_or(true)) };
+    }
+    if !mb.username.is_empty() {
+        config.username = mb.username.clone();
+    }
+    if mb.kind == "imap" {
+        config.source = "your Mailbird settings".into();
+    }
+    Ok(config)
+}
+
+/// Connects an imported archive account to its server: it becomes live and keeps its archive.
+#[tauri::command]
+pub async fn connect_archive(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: i64,
+    config: AccountConfig,
+    password: String,
+) -> Res<()> {
+    imap::test_login(&config, &password).await.map_err(|e| format!("Incoming mail (IMAP): {}", full(e)))?;
+    smtp::test_login(&config, &password).await.map_err(|e| format!("Outgoing mail (SMTP): {}", full(e)))?;
+    secrets::save_password(&config.email, &password).map_err(full)?;
+    let json = serde_json::to_string(&config).map_err(err)?;
+    state.0.lock().map_err(err)?.connect_archive(account_id, &json, &cache_root()).map_err(err)?;
+    tauri::async_runtime::spawn(async move { sync_accounts(app, Some(account_id)).await });
+    Ok(())
+}
+
 /// A live account's current server settings, for the edit form.
 #[tauri::command]
 pub fn live_config(state: State<'_, AppState>, account_id: i64) -> Res<AccountConfig> {

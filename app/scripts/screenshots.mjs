@@ -26,7 +26,7 @@ const mock = () => {
     "accounts@oxydev.co.za", "oxydev.web@gmail.com", "franchisewebdevelopment@gmail.com", "graeme@atomiccreative.co.uk",
     "practexerp@gmail.com", "accounts@practex.co.za", "toolbecontinued@gmail.com", "graeme.bosworth@windsorcreative.org.nz", "junia@oxydev.co.za"];
   const accounts = names.map((name, i) => ({ id: i + 1, name, kind: i === 8 ? "imap" : "archive", label: null, sender_name: "Graeme Bosworth",
-    color: colors[i % colors.length], signature: i === 8 ? "<b>Graeme Bosworth</b><div>Mobile: 061 000 0000</div>" : null, icon: null, unread: i % 4 === 0 ? 12 * i + 3 : 0 }));
+    color: colors[i % colors.length], signature: i === 8 ? "<b>Graeme Bosworth</b><div>Mobile: 061 000 0000</div>" : null, icon: null, has_archive: true, unread: i % 4 === 0 ? 12 * i + 3 : 0 }));
   const folderNames = [["Inbox", "inbox"], ["Drafts", "drafts"], ["Sent", "sent"], ["Archive", "archive"], ["Clients / Bay Solar", null], ["Invoices", null], ["Spam", "spam"], ["Trash", "trash"]];
   const folders = (aid) => folderNames.map(([name, role], j) => ({ id: aid * 100 + j, account_id: aid, name, role, total: 500 - j * 40, unread: j === 0 ? 7 : 0 }));
   const now = Math.floor(Date.now() / 1000);
@@ -46,6 +46,9 @@ const mock = () => {
     message: ({ id }) => view(id), settings: () => settings, set_setting: () => null, data_location: () => "/home/graeme/.local/share/oxymail/oxymail.db",
     search: () => [], set_flag: () => null,
     live_config: () => ({ email: "graeme@oxydev.co.za", username: "graeme@oxydev.co.za", source: "the provider's autoconfig", oauth: null,
+      imap: { host: "mail.oxydev.co.za", port: 993, security: "tls" }, smtp: { host: "mail.oxydev.co.za", port: 465, security: "tls" } }),
+    connect_suggestion: () => ({ email: "hello@oxydev.co.za", username: "hello@oxydev.co.za", oauth: null,
+      source: "your Mailbird settings (POP3 there; OxyMail uses IMAP on the same server)",
       imap: { host: "mail.oxydev.co.za", port: 993, security: "tls" }, smtp: { host: "mail.oxydev.co.za", port: 465, security: "tls" } }),
     discover_account: ({ email }) => ({ email, username: email, source: "Mozilla's ISP database (via MX)", oauth: "google",
       imap: { host: "imap.gmail.com", port: 993, security: "tls" }, smtp: { host: "smtp.gmail.com", port: 465, security: "tls" } }), "plugin:event|listen": () => 1, "plugin:event|unlisten": () => null,
@@ -77,6 +80,12 @@ const shots = [
     await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")');
     await p.locator(".accounts li", { hasText: "graeme@oxydev.co.za" }).locator("button.edit").click();
     await p.waitForTimeout(200); await p.locator(".content").evaluate((el) => (el.scrollTop = 520));
+  }],
+  ["connect-archive", 1360, 860, "dark", async (p) => {
+    await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")');
+    await p.locator(".accounts li", { hasText: "hello@oxydev.co.za" }).locator("button.edit").click();
+    await p.click('.dialog button:text-is("Set up sending and receiving")');
+    await p.waitForTimeout(200); await p.locator(".content").evaluate((el) => (el.scrollTop = 560));
   }],
   ["add-account-gmail", 1360, 860, "dark", async (p) => {
     await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")');

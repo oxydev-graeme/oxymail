@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 mod live;
-pub use live::{LiveAccount, RemoteFolder};
+pub use live::{LiveAccount, MailbirdServer, RemoteFolder};
 
 const SCHEMA: &str = "
 create table if not exists accounts (
@@ -27,6 +27,7 @@ create table if not exists accounts (
     signature text,
     icon text,
     config text,
+    archive_root text,
     sort_index integer not null default 0,
     removed integer not null default 0,
     unique (kind, root)
@@ -58,6 +59,7 @@ create table if not exists messages (
     origin_folder_id integer not null references folders(id),
     deleted integer not null default 0,
     uid integer,
+    from_archive integer not null default 0,
     unique (origin_folder_id, file)
 );
 create index if not exists messages_folder_date on messages(folder_id, deleted, date desc);
@@ -71,7 +73,7 @@ create table if not exists settings (
 ";
 
 /// `PRAGMA user_version` for the current schema.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// v4 added what live IMAP folders need.
 const FOLDER_COLUMNS_V4: &[(&str, &str)] = &[
@@ -157,6 +159,8 @@ pub struct Account {
     pub icon: Option<String>,
     /// Unread messages outside Sent, Drafts, Spam and Trash.
     pub unread: i64,
+    /// True when the account holds imported archive mail (it may also be live).
+    pub has_archive: bool,
 }
 
 /// Editable account fields. `None` clears a field.
@@ -267,17 +271,24 @@ impl Store {
         for account_dir in sorted_dirs(root)? {
             let account_name = file_name(&account_dir);
             let root_str = account_dir.to_string_lossy().to_string();
-            tx.execute(
-                "insert into accounts (name, kind, root, sort_index)
-                 values (?1, 'archive', ?2, (select coalesce(max(sort_index), -1) + 1 from accounts))
-                 on conflict (kind, root) do update set removed = 0",
-                params![account_name, root_str],
-            )?;
-            let account_id: i64 = tx.query_row(
-                "select id from accounts where kind = 'archive' and root = ?1",
-                [&root_str],
-                |r| r.get(0),
-            )?;
+            // Matched on archive_root, so an archive later connected to its server is still found.
+            let existing: Option<i64> = tx
+                .query_row("select id from accounts where archive_root = ?1", [&root_str], |r| r.get(0))
+                .optional()?;
+            let account_id = match existing {
+                Some(id) => {
+                    tx.execute("update accounts set removed = 0 where id = ?1", [id])?;
+                    id
+                }
+                None => {
+                    tx.execute(
+                        "insert into accounts (name, kind, root, archive_root, sort_index)
+                         values (?1, 'archive', ?2, ?2, (select coalesce(max(sort_index), -1) + 1 from accounts))",
+                        params![account_name, root_str],
+                    )?;
+                    tx.last_insert_rowid()
+                }
+            };
             for folder_dir in sorted_dirs(&account_dir)? {
                 let folder_name = file_name(&folder_dir);
                 tx.execute(
@@ -294,7 +305,7 @@ impl Store {
                     let Ok(entries) = fs::read_dir(folder_dir.join(sub)) else { continue };
                     for entry in entries {
                         let entry = entry?;
-                        let rel = format!("{sub}/{}", entry.file_name().to_string_lossy());
+                        let rel = entry.path().to_string_lossy().to_string();
                         let exists: Option<i64> = tx
                             .query_row(
                                 "select id from messages where origin_folder_id = ?1 and file = ?2",
@@ -307,10 +318,11 @@ impl Store {
                             continue;
                         }
                         let raw = fs::read(entry.path())?;
-                        if index_message(&tx, &parser, folder_id, &rel, &raw, None)?.is_none() {
+                        let Some(id) = index_message(&tx, &parser, folder_id, &rel, &raw, None)? else {
                             stats.unreadable += 1;
                             continue;
-                        }
+                        };
+                        tx.execute("update messages set from_archive = 1 where id = ?1", [id])?;
                         stats.added += 1;
                         if stats.added % 2000 == 0 {
                             progress(stats.added);
@@ -330,6 +342,7 @@ impl Store {
                     (select count(*) from messages m join folders f on f.id = m.folder_id
                      where f.account_id = a.id and m.deleted = 0 and instr(m.flags, 'S') = 0
                        and coalesce(f.role, '') not in ('sent', 'drafts', 'spam', 'trash'))
+             , a.archive_root is not null
              from accounts a where a.removed = 0 order by a.sort_index, a.name",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -343,6 +356,7 @@ impl Store {
                 signature: r.get(6)?,
                 icon: r.get(7)?,
                 unread: r.get(8)?,
+                has_archive: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -466,6 +480,9 @@ impl Store {
             [id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
+        if Path::new(&file).is_absolute() {
+            return Ok(PathBuf::from(file));
+        }
         Ok(Path::new(&root).join(folder).join(file))
     }
 
@@ -753,7 +770,23 @@ fn migrate(db: &Connection) -> Result<()> {
         }
     }
     add_missing_columns(db, "folders", FOLDER_COLUMNS_V4)?;
-    add_missing_columns(db, "messages", &[("uid", "integer")])?;
+    add_missing_columns(db, "messages", &[("uid", "integer"), ("from_archive", "integer not null default 0")])?;
+    add_missing_columns(db, "accounts", &[("archive_root", "text")])?;
+    if version < 5 {
+        // v5: an archive account can be connected to its server and become live, so its
+        // archive location moves to `archive_root` and archive message paths become absolute
+        // (the account's `root` then points at the live cache).
+        db.execute_batch(
+            "update accounts set archive_root = root where kind = 'archive' and archive_root is null;
+             update messages set from_archive = 1,
+                 file = (select a.root || '/' || f.name || '/' || messages.file
+                         from folders f join accounts a on a.id = f.account_id
+                         where f.id = messages.origin_folder_id)
+             where file not like '/%'
+               and origin_folder_id in (select f.id from folders f join accounts a on a.id = f.account_id
+                                        where a.kind = 'archive');",
+        )?;
+    }
     db.execute_batch("create index if not exists messages_folder_uid on messages(origin_folder_id, uid)")?;
     db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
@@ -826,7 +859,7 @@ fn apply_mailbird_metadata(db: &Connection, root: &Path) -> Result<()> {
                 color = coalesce(color, ?1),
                 sender_name = coalesce(sender_name, ?2),
                 signature = coalesce(signature, ?3)
-             where kind = 'archive' and root = ?4",
+             where archive_root = ?4",
             params![
                 text(account, "ColorHex"),
                 identity.and_then(|i| text(i, "Name")).filter(|n| n != &username),
@@ -840,7 +873,7 @@ fn apply_mailbird_metadata(db: &Connection, root: &Path) -> Result<()> {
         if !reordered {
             if let Some(index) = account.get("SortIndex").and_then(|x| x.as_i64()) {
                 db.execute(
-                    "update accounts set sort_index = ?1 where kind = 'archive' and root = ?2",
+                    "update accounts set sort_index = ?1 where archive_root = ?2",
                     params![index, root_str],
                 )?;
             }
