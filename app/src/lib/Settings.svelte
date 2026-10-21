@@ -20,7 +20,7 @@
 
   const sections = [
     ["appearance", "Appearance"],
-    ["reading", "Reading"],
+    ["reading", "Reading & sending"],
     ["accounts", "Accounts"],
     ["signin", "Sign-in"],
     ["import", "Import"],
@@ -94,7 +94,7 @@
           <p class="hint">Compact hides the preview line and fits more messages on screen.</p>
         </div>
       {:else if section === "reading"}
-        <h2>Reading</h2>
+        <h2>Reading &amp; sending</h2>
         <label class="toggle">
           <input
             type="checkbox"
@@ -103,6 +103,23 @@
           />
           <span>Mark messages as read when opened</span>
         </label>
+        <label class="toggle">
+          <input
+            type="checkbox"
+            checked={settings.notifications !== "false"}
+            onchange={(e) => onchange("notifications", String(e.currentTarget.checked))}
+          />
+          <span>Desktop notification when new mail arrives in an Inbox</span>
+        </label>
+        <div class="field">
+          <div class="label">Undo send</div>
+          <div class="segmented">
+            {#each [["0", "Off"], ["5", "5 s"], ["8", "8 s"], ["15", "15 s"], ["30", "30 s"]] as [value, label]}
+              <button class:on={(settings.undo_send_seconds ?? "8") === value} onclick={() => onchange("undo_send_seconds", value)}>{label}</button>
+            {/each}
+          </div>
+          <p class="hint">How long OxyMail waits before sending, so you can take a message back.</p>
+        </div>
         <div class="field">
           <div class="label">Remote content</div>
           <p class="hint">

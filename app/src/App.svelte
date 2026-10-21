@@ -20,6 +20,13 @@
   let folder = $state(null);
 
   let account = $derived(accounts.find((a) => a.id === accountId) ?? null);
+  let allInboxUnread = $derived(accounts.reduce((n, a) => n + a.unread, 0));
+
+  function openAllInboxes() {
+    accountId = null;
+    folders = [];
+    openFolder({ id: "all-inboxes", unified: true, name: "All inboxes", role: "inbox", unread: 0 });
+  }
   let liveAccounts = $derived(accounts.filter(isLive));
 
   let composing = $state(null);
@@ -87,6 +94,14 @@
         }
       }
     });
+    listen("mail-changed", async ({ payload }) => {
+      accounts = await api.accounts();
+      if (payload.account_id === accountId) {
+        folders = await api.folders(accountId);
+        if (folder) folder = folders.find((f) => f.id === folder.id) ?? folder;
+        if (!searching) refreshList();
+      }
+    });
     listen("sync-error", ({ payload }) => {
       error = payload.error;
     });
@@ -95,7 +110,7 @@
   /** Reloads the visible page of the folder without losing the selection. */
   async function refreshList() {
     if (!folder) return;
-    const page = await api.messages(folder.id, 0, Math.max(list.length, PAGE));
+    const page = await fetchPage(0, Math.max(list.length, PAGE));
     list = page;
     listDone = page.length < PAGE;
   }
@@ -151,7 +166,8 @@
       account_id: sendingAccount(selected),
       subject: prefixed("Fwd", view.subject ?? ""),
       quote: `<div>---------- Forwarded message ----------<br>${head}</div><br>${originalHtml(view)}`,
-      note: view.attachments.length ? "The original attachments aren't forwarded yet; save and re-attach them." : "",
+      forward_from: view.id,
+      forwarded: view.attachments.map(({ index, name, size }) => ({ index, name, size })),
     };
   }
 
@@ -227,11 +243,15 @@
     await loadMore();
   }
 
+  /** A page of the current folder, or of every Inbox for the "All inboxes" view. */
+  const fetchPage = (offset, limit) =>
+    folder.unified ? api.messagesByRole("inbox", offset, limit) : api.messages(folder.id, offset, limit);
+
   async function loadMore() {
     if (loadingList || listDone || searching || !folder) return;
     loadingList = true;
     try {
-      const page = await api.messages(folder.id, list.length, PAGE);
+      const page = await fetchPage(list.length, PAGE);
       list = [...list, ...page];
       listDone = page.length < PAGE;
     } catch (e) {
@@ -293,13 +313,18 @@
   }
 
   /** Runs a move-style action, takes the message out of the list and offers Undo. */
-  async function moveAway(m, action, label) {
+  async function moveAway(m, action, label, undoable = true) {
     if (!m) return;
     const from = m.folder_id;
-    const ok = await act(action);
-    if (!ok) return;
+    // Take it out of the list straight away; server moves can take a moment.
     dropFromList(m.id);
+    const ok = await act(action);
+    if (!ok) {
+      if (!searching && folder) refreshList();
+      return;
+    }
     refreshFolders(m.account_id);
+    if (!undoable) return flash(label);
     flash(label, async () => {
       await act(() => api.moveToFolder([m.id], from));
       refreshFolders(m.account_id);
@@ -314,12 +339,16 @@
   function remove(m = selected) {
     if (!m) return;
     if (m.folder_role === "trash") {
+      const live = isLive(accounts.find((a) => a.id === m.account_id));
       const ok = confirm(
-        "Remove this message from OxyMail?\n\nIt disappears from every folder and search. " +
-          "For archive accounts the original file in your export is kept.",
+        live
+          ? "Delete this message forever?\n\nIt is removed from the mail server and can't be undone. " +
+              "A copy in your Mailbird archive, if any, is kept on disk."
+          : "Remove this message from OxyMail?\n\nIt disappears from every folder and search. " +
+              "For archive accounts the original file in your export is kept.",
       );
       if (!ok) return;
-      return moveAway(m, () => api.remove([m.id]), "Removed from OxyMail");
+      return moveAway(m, () => api.remove([m.id]), live ? "Deleted forever" : "Removed from OxyMail", false);
     }
     return moveAway(m, () => api.remove([m.id]), "Moved to Trash");
   }
@@ -376,9 +405,9 @@
       j: () => keys.ArrowDown(),
       ArrowUp: () => list[Math.max(i - 1, 0)] && select(list[Math.max(i - 1, 0)].id),
       k: () => keys.ArrowUp(),
-      e: () => !selectedLive && (selectedRole === "archive" ? moveToInbox() : archive()),
-      Delete: () => !selectedLive && remove(),
-      "#": () => !selectedLive && remove(),
+      e: () => (selectedRole === "archive" ? moveToInbox() : archive()),
+      Delete: () => remove(),
+      "#": () => remove(),
       s: () => toggleStar(),
       u: () => toggleRead(),
       "/": () => searchInput?.focus(),
@@ -395,10 +424,31 @@
     }
   }
 
-  function flash(message, undo = null) {
+  function flash(message, undo = null, ms = 6000) {
     clearTimeout(toastTimer);
     toast = { message, undo };
-    toastTimer = setTimeout(() => (toast = null), 6000);
+    toastTimer = setTimeout(() => (toast = null), ms);
+  }
+
+  // ---- Sending with undo ----------------------------------------------------
+
+  /** Holds a message for the undo window, then sends it. Undo or failure reopens Compose. */
+  function queueSend(accountId, mail, reopen) {
+    composing = null;
+    const seconds = Number(settings.undo_send_seconds) || 0;
+    const send = async () => {
+      try {
+        flash(await api.sendMessage(accountId, mail));
+      } catch (e) {
+        composing = { ...reopen, error: `Not sent: ${e}` };
+      }
+    };
+    if (!seconds) return send();
+    const timer = setTimeout(send, seconds * 1000);
+    flash(`Sending in ${seconds} seconds…`, () => {
+      clearTimeout(timer);
+      composing = reopen;
+    }, seconds * 1000);
   }
 
   async function runImport() {
@@ -453,6 +503,15 @@
 
   <div class="shell">
     <aside class="sidebar">
+      <nav class="accounts unified">
+        <div class="account" class:active={folder?.unified && !searching}>
+          <button class="account-main" onclick={openAllInboxes}>
+            <span class="all-icon"><Icon name="inbox" size={15} /></span>
+            <span class="ellipsis">All inboxes</span>
+            {#if allInboxUnread > 0}<span class="count">{allInboxUnread.toLocaleString()}</span>{/if}
+          </button>
+        </div>
+      </nav>
       <div class="section">Accounts</div>
       <nav class="accounts">
         {#each accounts as a (a.id)}
@@ -502,7 +561,7 @@
       <div class="list-title">
         <span class="ellipsis">{searching ? `Results for “${query}”` : (folder?.name ?? "")}</span>
         {#if searching && !loadingList}<span class="muted">{list.length}</span>{/if}
-        {#if !searching && folder?.unread > 0}
+        {#if !searching && !folder?.unified && folder?.unread > 0}
           <button class="mark-read" onclick={markFolderRead} title="Mark every message in this folder as read">
             <Icon name="checks" size={14} /> Mark all read
           </button>
@@ -523,20 +582,23 @@
               {#if settings.density !== "compact"}
                 <div class="row-snippet ellipsis">{m.snippet}</div>
               {/if}
-              {#if searching}<div class="row-folder">{m.folder_name}</div>{/if}
+              {#if searching || folder?.unified}
+                {@const a = accounts.find((x) => x.id === m.account_id)}
+                <div class="row-folder">
+                  {#if a}<span class="acct-dot" style:background={a.color || "var(--faint)"}></span>{accountLabel(a)}{#if searching} · {m.folder_name}{/if}{:else}{m.folder_name}{/if}
+                </div>
+              {/if}
             </button>
             <div class="row-actions">
               <button class:starred={m.starred} onclick={() => toggleStar(m)} title={m.starred ? "Unstar" : "Star"}>
                 <Icon name="star" size={15} />
               </button>
-              {#if !isLive(accounts.find((a) => a.id === m.account_id))}
-                {#if m.folder_role !== "archive" && m.folder_role !== "trash"}
-                  <button onclick={() => archive(m)} title="Archive"><Icon name="archive" size={15} /></button>
-                {/if}
-                <button onclick={() => remove(m)} title={m.folder_role === "trash" ? "Remove from OxyMail" : "Delete"}>
-                  <Icon name="trash" size={15} />
-                </button>
+              {#if m.folder_role !== "archive" && m.folder_role !== "trash"}
+                <button onclick={() => archive(m)} title="Archive"><Icon name="archive" size={15} /></button>
               {/if}
+              <button onclick={() => remove(m)} title={m.folder_role === "trash" ? "Delete forever" : "Delete"}>
+                <Icon name="trash" size={15} />
+              </button>
             </div>
             {#if m.starred}<span class="star-pin"><Icon name="star" size={12} /></span>{/if}
           </div>
@@ -566,11 +628,9 @@
           <button onclick={() => reply(true)} title="Reply all (a)"><Icon name="replyAll" size={16} /><span>Reply all</span></button>
           <button onclick={forward} title="Forward (f)"><Icon name="forward" size={16} /><span>Forward</span></button>
           <span class="sep"></span>
-          {#if selectedLive}
-            <!-- Moving and deleting live mail arrives with two-way sync. -->
-          {:else if selectedRole === "trash"}
+          {#if selectedRole === "trash"}
             <button onclick={() => restore()}><Icon name="restore" size={16} /><span>Restore</span></button>
-            <button class="danger" onclick={() => remove()}><Icon name="trash" size={16} /><span>Remove from OxyMail</span></button>
+            <button class="danger" onclick={() => remove()}><Icon name="trash" size={16} /><span>{selectedLive ? "Delete forever" : "Remove from OxyMail"}</span></button>
           {:else}
             {#if selectedRole === "archive"}
               <button onclick={() => moveToInbox()} title="Move to Inbox (e)"><Icon name="inbox" size={16} /><span>Move to Inbox</span></button>
@@ -639,7 +699,7 @@
     draft={composing}
     accounts={liveAccounts}
     onclose={() => (composing = null)}
-    onsent={(note) => { composing = null; flash(note); }}
+    onsend={queueSend}
   />
 {/if}
 
@@ -719,6 +779,9 @@
   .account { position: relative; display: flex; align-items: center; border-radius: 7px; }
   .account:hover { background: var(--hover); }
   .account.active { background: var(--selected); }
+  .unified { padding-top: 10px; }
+  .all-icon { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 30%; background: var(--accent-soft); color: var(--accent); flex-shrink: 0; }
+  .acct-dot { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; vertical-align: 1px; }
   .account-main { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; padding: 5px 8px; text-align: left; font-size: 13px; }
   .account.active .account-main { font-weight: 600; }
   .account-read { display: none; place-items: center; width: 26px; height: 26px; margin-right: 4px; border-radius: 6px; color: var(--muted); }

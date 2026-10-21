@@ -7,6 +7,14 @@ repo="$(cd "$(dirname "$0")/.." && pwd)"
 target="${CARGO_TARGET_DIR:-$HOME/.cache/oxymail-target}"
 data="${XDG_DATA_HOME:-$HOME/.local/share}"
 
+# Optional sign-in client IDs compiled into this copy (kept out of the public repo):
+#   OXYMAIL_GOOGLE_CLIENT_ID=…  OXYMAIL_GOOGLE_CLIENT_SECRET=…  OXYMAIL_MICROSOFT_CLIENT_ID=…
+oauth_env="${XDG_CONFIG_HOME:-$HOME/.config}/oxymail/oauth.env"
+if [ -f "$oauth_env" ]; then
+  set -a; . "$oauth_env"; set +a
+  echo "Using sign-in clients from $oauth_env"
+fi
+
 cd "$repo/app"
 [ -d node_modules ] || npm install
 # Built without the Tauri CLI, which needs file watches that a busy desktop can run out of.

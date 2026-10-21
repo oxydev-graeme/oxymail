@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 mod live;
-pub use live::{LiveAccount, MailbirdServer, RemoteFolder};
+pub use live::{LiveAccount, MailbirdServer, RemoteFolder, RemoteRef};
 
 const SCHEMA: &str = "
 create table if not exists accounts (
@@ -66,6 +66,14 @@ create index if not exists messages_folder_date on messages(folder_id, deleted, 
 create virtual table if not exists messages_fts using fts5(
     subject, sender, recipients, body, content=''
 );
+create table if not exists contacts (
+    email text primary key,
+    name text,
+    uses integer not null default 0,
+    last_used integer not null default 0,
+    in_address_book integer not null default 0,
+    blocked integer not null default 0
+);
 create table if not exists settings (
     key text primary key,
     value text not null
@@ -73,7 +81,7 @@ create table if not exists settings (
 ";
 
 /// `PRAGMA user_version` for the current schema.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// v4 added what live IMAP folders need.
 const FOLDER_COLUMNS_V4: &[(&str, &str)] = &[
@@ -226,6 +234,20 @@ pub struct MessageView {
     pub attachments: Vec<AttachmentInfo>,
     /// OxyMail notes added at export time, such as a body Mailbird never downloaded.
     pub notices: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContactSuggestion {
+    pub email: String,
+    pub name: Option<String>,
+}
+
+/// Sender and subject of a raw message, for notifications.
+pub fn peek_sender_subject(raw: &[u8]) -> (String, String) {
+    let Some(msg) = MessageParser::default().parse_headers(raw) else { return Default::default() };
+    let from = msg.from().and_then(|a| a.first());
+    let sender = from.and_then(|a| a.name().or(a.address())).unwrap_or_default().to_string();
+    (sender, msg.subject().unwrap_or_default().to_string())
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -680,6 +702,55 @@ impl Store {
         Ok(())
     }
 
+    /// Address suggestions for the compose fields, address-book entries and frequent
+    /// correspondents first.
+    pub fn suggest_contacts(&self, query: &str, limit: i64) -> Result<Vec<ContactSuggestion>> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.db.prepare(
+            "select email, name from contacts
+             where blocked = 0 and (email like ?1 || '%' or lower(name) like ?1 || '%'
+                    or lower(name) like '% ' || ?1 || '%' or email like '%.' || ?1 || '%')
+             order by in_address_book desc, uses desc, last_used desc limit ?2",
+        )?;
+        let rows = stmt.query_map(params![q, limit], |r| Ok(ContactSuggestion { email: r.get(0)?, name: r.get(1)? }))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Counts the people you write to, so they rank higher in suggestions.
+    pub fn note_sent_to(&self, addresses: &[String]) -> Result<()> {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        for a in addresses {
+            let (name, email) = match (a.rfind('<'), a.rfind('>')) {
+                (Some(l), Some(r)) if l < r => (Some(a[..l].trim().trim_matches('"')), &a[l + 1..r]),
+                _ => (None, a.as_str()),
+            };
+            note_contact(&self.db, email.trim(), name, 5, now)?;
+        }
+        Ok(())
+    }
+
+    /// Messages across every account's folders with this role (e.g. all Inboxes), newest first.
+    pub fn messages_by_role(&self, role: &str, offset: i64, limit: i64) -> Result<Vec<MessageSummary>> {
+        self.summaries(
+            "where f.role = ?1 and m.deleted = 0 order by m.date desc limit ?2 offset ?3",
+            params![role, limit, offset],
+        )
+    }
+
+    /// Unread count across every account's folders with this role.
+    pub fn unread_by_role(&self, role: &str) -> Result<i64> {
+        Ok(self.db.query_row(
+            "select count(*) from messages m join folders f on f.id = m.folder_id
+             join accounts a on a.id = f.account_id and a.removed = 0
+             where f.role = ?1 and m.deleted = 0 and instr(m.flags, 'S') = 0",
+            [role],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn settings(&self) -> Result<std::collections::BTreeMap<String, String>> {
         let mut stmt = self.db.prepare("select key, value from settings")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -734,6 +805,9 @@ pub(crate) fn index_message(
         ],
     )?;
     let id = db.last_insert_rowid();
+    if let Some(addr) = from.and_then(|a| a.address()) {
+        note_contact(db, addr, from.and_then(|a| a.name()), 1, msg.date().map(|d| d.to_timestamp()).unwrap_or(0))?;
+    }
     db.execute(
         "insert into messages_fts (rowid, subject, sender, recipients, body) values (?1, ?2, ?3, ?4, ?5)",
         params![
@@ -745,6 +819,22 @@ pub(crate) fn index_message(
         ],
     )?;
     Ok(Some(id))
+}
+
+/// Records that an address was seen (`weight` 1 for mail received, more for mail you send).
+pub(crate) fn note_contact(db: &Connection, email: &str, name: Option<&str>, weight: i64, when: i64) -> Result<()> {
+    if !email.contains('@') {
+        return Ok(());
+    }
+    db.execute(
+        "insert into contacts (email, name, uses, last_used) values (lower(?1), ?2, ?3, ?4)
+         on conflict (email) do update set
+             uses = uses + excluded.uses,
+             last_used = max(last_used, excluded.last_used),
+             name = coalesce(contacts.name, excluded.name)",
+        params![email, name.filter(|n| !n.trim().is_empty() && *n != email), weight, when],
+    )?;
+    Ok(())
 }
 
 fn migrate(db: &Connection) -> Result<()> {
@@ -788,6 +878,15 @@ fn migrate(db: &Connection) -> Result<()> {
         )?;
     }
     db.execute_batch("create index if not exists messages_folder_uid on messages(origin_folder_id, uid)")?;
+    if version < 6 {
+        // v6: the address book for autocomplete starts from everyone who has written to you.
+        db.execute_batch(
+            "insert into contacts (email, name, uses, last_used)
+             select lower(from_addr), max(from_name), count(*), max(date) from messages
+             where from_addr like '%@%' group by lower(from_addr)
+             on conflict (email) do nothing;",
+        )?;
+    }
     db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -848,6 +947,7 @@ fn apply_mailbird_metadata(db: &Connection, root: &Path) -> Result<()> {
         return Ok(());
     }
     let identities = read("SenderIdentities.jsonl");
+    import_mailbird_contacts(db, &read("Contacts.jsonl"), &read("UserContacts.jsonl"), &read("UserContactFields.jsonl"))?;
     let text = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
     for account in &accounts {
         let Some(username) = text(account, "Username") else { continue };
@@ -890,6 +990,62 @@ pub(crate) fn sanitize_component(name: &str) -> String {
         .collect();
     let cleaned = cleaned.trim().trim_start_matches('.').to_string();
     if cleaned.is_empty() { "_".to_string() } else { cleaned }
+}
+
+/// Mailbird's collected addresses (with their last-contact date) and its address book.
+fn import_mailbird_contacts(
+    db: &Connection,
+    collected: &[serde_json::Value],
+    people: &[serde_json::Value],
+    fields: &[serde_json::Value],
+) -> Result<()> {
+    let text = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(unescape_html);
+    for c in collected {
+        if c.get("IsValidSingleContact").and_then(|x| x.as_i64()) == Some(0) {
+            continue;
+        }
+        let Some(email) = text(c, "Email") else { continue };
+        let when = text(c, "LatestMessageAt_UTC").as_deref().and_then(parse_utc).unwrap_or(0);
+        note_contact(db, &email, text(c, "Name").as_deref(), 0, when)?;
+        if c.get("IsBlocked").and_then(|x| x.as_i64()) == Some(1) {
+            db.execute("update contacts set blocked = 1 where email = lower(?1)", [&email])?;
+        }
+    }
+    for f in fields.iter().filter(|f| f.get("Category").and_then(|x| x.as_i64()) == Some(1)) {
+        let (Some(email), Some(person)) = (text(f, "Value"), f.get("UserContactId").and_then(|x| x.as_i64())) else { continue };
+        let name = people.iter().find(|p| p.get("Id").and_then(|x| x.as_i64()) == Some(person)).map(|p| {
+            [text(p, "FirstName"), text(p, "LastName")].into_iter().flatten().collect::<Vec<_>>().join(" ")
+        });
+        note_contact(db, &email, name.as_deref(), 0, 0)?;
+        db.execute(
+            "update contacts set in_address_book = 1, name = coalesce(nullif(?2, ''), name) where email = lower(?1)",
+            params![email, name],
+        )?;
+    }
+    Ok(())
+}
+
+fn unescape_html(s: &str) -> String {
+    s.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'")
+}
+
+/// `2025-05-05 11:17:50Z` (Mailbird's UTC format) to a Unix timestamp.
+fn parse_utc(s: &str) -> Option<i64> {
+    let s = s.trim_end_matches('Z');
+    let (date, time) = s.split_once(' ')?;
+    let d: Vec<i64> = date.split('-').filter_map(|x| x.parse().ok()).collect();
+    let t: Vec<i64> = time.split(':').filter_map(|x| x.split('.').next()?.parse().ok()).collect();
+    if d.len() != 3 || t.len() != 3 {
+        return None;
+    }
+    // Days from civil date (Howard Hinnant's algorithm).
+    let (y, m, day) = (if d[1] <= 2 { d[0] - 1 } else { d[0] }, d[1], d[2]);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(days * 86400 + t[0] * 3600 + t[1] * 60 + t[2])
 }
 
 fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -992,6 +1148,13 @@ mod tests {
     fn search_words_are_quoted_prefixes() {
         assert_eq!(fts_query(r#"invoice "acme"#), r#""invoice"* "acme"*"#);
         assert_eq!(fts_query("   "), "");
+    }
+
+    #[test]
+    fn parses_mailbird_utc_dates() {
+        assert_eq!(parse_utc("1970-01-01 00:00:00Z"), Some(0));
+        assert_eq!(parse_utc("2025-05-05 11:17:50Z"), Some(1746443870));
+        assert_eq!(parse_utc("2020-11-09 09:16:16.8964887Z"), Some(1604913376));
     }
 
     #[test]

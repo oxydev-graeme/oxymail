@@ -34,6 +34,11 @@ pub struct Outgoing {
     pub references: Vec<String>,
     #[serde(default)]
     pub attachments: Vec<OutgoingAttachment>,
+    /// Forwarding: attachments of this message (by index) are added from its stored copy.
+    #[serde(default)]
+    pub forward_from: Option<i64>,
+    #[serde(default)]
+    pub forward_attachments: Vec<usize>,
 }
 
 /// Builds the RFC 5322 message. Bcc is left out of the headers; it only goes in the envelope.

@@ -158,6 +158,10 @@ pub struct SyncReport {
     pub new_messages: usize,
     pub removed: usize,
     pub errors: Vec<String>,
+    /// New unread Inbox mail since the last sync (not on a folder's first sync), for
+    /// notifications: total count plus sender and subject of the first few.
+    pub new_inbox: usize,
+    pub new_inbox_preview: Vec<(String, String)>,
 }
 
 /// Downloads new messages and refreshes flags for every folder of a live account.
@@ -167,19 +171,31 @@ pub async fn sync_account(
     account_id: i64,
     config: &AccountConfig,
     password: &str,
+    progress: impl FnMut(String),
+) -> Result<SyncReport> {
+    sync_folders(store, account_id, config, password, None, progress).await
+}
+
+/// Like [`sync_account`], limited to the named server folders when `only` is given.
+pub async fn sync_folders(
+    store: &mut Store,
+    account_id: i64,
+    config: &AccountConfig,
+    password: &str,
+    only: Option<&[String]>,
     mut progress: impl FnMut(String),
 ) -> Result<SyncReport> {
     let mut session = connect(config, password).await?;
     let mut report = SyncReport::default();
     let list = folders(&mut session).await?;
-    for info in &list {
+    for info in list.iter().filter(|f| only.is_none_or(|names| names.contains(&f.remote_name))) {
         // Gmail's All Mail and Starred duplicate every other folder; skip them.
         if matches!(info.role, Some("all") | Some("flagged")) {
             continue;
         }
         progress(format!("{}: {}", config.email, info.display));
         let role = info.role.filter(|r| *r != "all" && *r != "flagged");
-        match sync_folder(store, &mut session, account_id, info, role).await {
+        match sync_folder(store, &mut session, account_id, info, role, &mut report).await {
             Ok((new, removed)) => {
                 report.folders += 1;
                 report.new_messages += new;
@@ -198,6 +214,7 @@ async fn sync_folder(
     account_id: i64,
     info: &FolderInfo,
     role: Option<&str>,
+    report: &mut SyncReport,
 ) -> Result<(usize, usize)> {
     let folder = store.remote_folder(account_id, &info.remote_name, &info.display, role)?;
     // EXAMINE opens the folder read-only, so the server can't clear \Recent or similar.
@@ -233,8 +250,15 @@ async fn sync_folder(
         let fetches: Vec<_> = session.uid_fetch(&set, "(UID FLAGS BODY.PEEK[])").await?.try_collect().await?;
         for fetch in &fetches {
             let (Some(uid), Some(body)) = (fetch.uid, fetch.body()) else { continue };
-            if store.store_remote_message(folder.id, uid, &maildir_flags(fetch.flags()), body)? {
+            let flags = maildir_flags(fetch.flags());
+            if store.store_remote_message(folder.id, uid, &flags, body)? {
                 new += 1;
+                if role == Some("inbox") && last_uid > 0 && !flags.contains('S') {
+                    report.new_inbox += 1;
+                    if report.new_inbox_preview.len() < 3 {
+                        report.new_inbox_preview.push(oxymail_core::peek_sender_subject(body));
+                    }
+                }
             }
         }
     }
@@ -331,6 +355,73 @@ pub async fn store_flag(config: &AccountConfig, password: &str, folder: &str, ui
     let _: Vec<_> = session.uid_store(&set, format!("{sign}FLAGS.SILENT ({imap_flag})")).await?.try_collect().await?;
     let _ = session.logout().await;
     Ok(())
+}
+
+/// The server folder for a role, created (as `Archive`/`Trash`) if the server has none.
+/// Gmail's archive is All Mail: archiving there just removes the Inbox label.
+pub async fn folder_for_role(session: &mut ImapSession, role: &str) -> Result<String> {
+    let list = folders(session).await?;
+    let wanted = if role == "archive" && list.iter().any(|f| f.role == Some("all")) { "all" } else { role };
+    if let Some(f) = list.iter().find(|f| f.role == Some(wanted)) {
+        return Ok(f.remote_name.clone());
+    }
+    let name = match role {
+        "archive" => "Archive",
+        "trash" => "Trash",
+        "inbox" => "INBOX",
+        other => bail!("no {other} folder on the server"),
+    };
+    // Some servers nest everything under INBOX (e.g. "INBOX.Archive").
+    let nested = list.iter().any(|f| f.remote_name.starts_with("INBOX.") || f.remote_name.starts_with("INBOX/"));
+    let delimiter = list.iter().find_map(|f| f.remote_name.strip_prefix("INBOX").and_then(|r| r.chars().next())).unwrap_or('.');
+    let full = if nested { format!("INBOX{delimiter}{name}") } else { name.to_string() };
+    session.create(&full).await.with_context(|| format!("creating {full} on the server"))?;
+    Ok(full)
+}
+
+/// Moves messages between server folders: UID MOVE where supported, otherwise copy, flag
+/// \Deleted and expunge just those UIDs.
+pub async fn move_messages(session: &mut ImapSession, from: &str, uids: &[u32], to: &str) -> Result<()> {
+    if uids.is_empty() || from == to {
+        return Ok(());
+    }
+    let caps = session.capabilities().await?;
+    session.select(from).await?;
+    let set = uid_set(uids);
+    if caps.has_str("MOVE") {
+        session.uid_mv(&set, to).await.with_context(|| format!("moving to {to}"))?;
+    } else {
+        session.uid_copy(&set, to).await.with_context(|| format!("copying to {to}"))?;
+        let _: Vec<_> = session.uid_store(&set, "+FLAGS.SILENT (\\Deleted)").await?.try_collect().await?;
+        expunge(session, &caps, &set).await?;
+    }
+    Ok(())
+}
+
+/// Permanently deletes messages from a server folder.
+pub async fn delete_messages(session: &mut ImapSession, folder: &str, uids: &[u32]) -> Result<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
+    let caps = session.capabilities().await?;
+    session.select(folder).await?;
+    let set = uid_set(uids);
+    let _: Vec<_> = session.uid_store(&set, "+FLAGS.SILENT (\\Deleted)").await?.try_collect().await?;
+    expunge(session, &caps, &set).await
+}
+
+/// UID EXPUNGE (UIDPLUS) removes only our messages; plain EXPUNGE is the fallback.
+async fn expunge(session: &mut ImapSession, caps: &async_imap::types::Capabilities, set: &str) -> Result<()> {
+    if caps.has_str("UIDPLUS") {
+        let _: Vec<_> = session.uid_expunge(set).await?.try_collect().await?;
+    } else {
+        let _: Vec<_> = session.expunge().await?.try_collect().await?;
+    }
+    Ok(())
+}
+
+fn uid_set(uids: &[u32]) -> String {
+    uids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
 }
 
 /// Checks that we can log in, for the add-account form.

@@ -69,38 +69,6 @@ fn set_flag(app: AppHandle, state: State<AppState>, ids: Vec<i64>, flag: char, o
     Ok(())
 }
 
-/// Moves messages to the account's Inbox or Archive.
-#[tauri::command]
-fn move_to(state: State<AppState>, ids: Vec<i64>, role: String) -> Res<()> {
-    if role != "inbox" && role != "archive" {
-        return Err(format!("cannot move to {role}"));
-    }
-    let mut store = state.0.lock().map_err(err)?;
-    live::refuse_live(&store, &ids)?;
-    store.move_to_role(&ids, &role).map_err(err)
-}
-
-#[tauri::command]
-fn move_to_folder(state: State<AppState>, ids: Vec<i64>, folder_id: i64) -> Res<()> {
-    let mut store = state.0.lock().map_err(err)?;
-    live::refuse_live(&store, &ids)?;
-    store.move_to_folder(&ids, folder_id).map_err(err)
-}
-
-#[tauri::command]
-fn delete(state: State<AppState>, ids: Vec<i64>) -> Res<()> {
-    let mut store = state.0.lock().map_err(err)?;
-    live::refuse_live(&store, &ids)?;
-    store.delete(&ids).map_err(err)
-}
-
-#[tauri::command]
-fn restore(state: State<AppState>, ids: Vec<i64>) -> Res<()> {
-    let mut store = state.0.lock().map_err(err)?;
-    live::refuse_live(&store, &ids)?;
-    store.restore(&ids).map_err(err)
-}
-
 #[tauri::command]
 fn settings(state: State<AppState>) -> Res<BTreeMap<String, String>> {
     state.0.lock().map_err(err)?.settings().map_err(err)
@@ -145,6 +113,22 @@ fn mark_account_read(app: AppHandle, state: State<AppState>, account_id: i64) ->
 }
 
 #[tauri::command]
+fn suggest_contacts(state: State<AppState>, query: String) -> Res<Vec<oxymail_core::ContactSuggestion>> {
+    state.0.lock().map_err(err)?.suggest_contacts(&query, 8).map_err(err)
+}
+
+/// Messages from every account's folders with one role, for the "All inboxes" view.
+#[tauri::command]
+fn messages_by_role(state: State<AppState>, role: String, offset: i64, limit: i64) -> Res<Vec<MessageSummary>> {
+    state.0.lock().map_err(err)?.messages_by_role(&role, offset, limit).map_err(err)
+}
+
+#[tauri::command]
+fn unread_by_role(state: State<AppState>, role: String) -> Res<i64> {
+    state.0.lock().map_err(err)?.unread_by_role(&role).map_err(err)
+}
+
+#[tauri::command]
 fn data_location() -> String {
     Store::default_path().display().to_string()
 }
@@ -164,6 +148,7 @@ fn main() {
     live::load_oauth_clients(&store);
     tauri::Builder::default()
         .manage(AppState(Mutex::new(store)))
+        .plugin(tauri_plugin_notification::init())
         .manage(live::SyncState::default())
         .setup(|app| {
             // Check every live account at start-up and then every few minutes.
@@ -185,10 +170,10 @@ fn main() {
             save_attachment,
             import_archive,
             set_flag,
-            move_to,
-            move_to_folder,
-            delete,
-            restore,
+            live::move_to,
+            live::move_to_folder,
+            live::delete,
+            live::restore,
             settings,
             set_setting,
             data_location,
@@ -205,6 +190,9 @@ fn main() {
             live::update_server_settings,
             live::connect_suggestion,
             live::connect_archive,
+            suggest_contacts,
+            messages_by_role,
+            unread_by_role,
             live::oauth_sign_in,
             live::oauth_clients,
             live::set_oauth_client

@@ -1,24 +1,29 @@
 <script>
   import { onMount, untrack } from "svelte";
-  import { api, accountLabel, fileToBase64, formatSize, escapeHtml } from "./api.js";
+  import { accountLabel, fileToBase64, formatSize } from "./api.js";
   import Icon from "./Icon.svelte";
+  import RecipientInput from "./RecipientInput.svelte";
 
   /**
-   * draft: { account_id, to, cc, subject, quote (HTML), in_reply_to, references, note }
+   * draft: { account_id, to, cc, bcc, subject, quote (HTML), html (whole body, when reopening),
+   *          in_reply_to, references, attachments, forward_from, forwarded, note }
    * accounts: live accounts that can send.
+   * onsend(accountId, mail, reopen): hands the message over; `reopen` is the draft to bring back
+   * if the send is undone or fails.
    */
-  let { draft, accounts, onclose, onsent } = $props();
+  let { draft, accounts, onclose, onsend } = $props();
 
   // The draft is read once, when the window opens.
   const initial = untrack(() => ({ ...draft, account_id: draft.account_id ?? accounts[0]?.id }));
   let accountId = $state(initial.account_id);
   let to = $state(initial.to ?? "");
   let cc = $state(initial.cc ?? "");
-  let bcc = $state("");
-  let showCc = $state(Boolean(initial.cc));
+  let bcc = $state(initial.bcc ?? "");
+  let showCc = $state(Boolean(initial.cc || initial.bcc));
   let subject = $state(initial.subject ?? "");
-  let attachments = $state([]);
-  let sending = $state(false);
+  let attachments = $state(initial.attachments ?? []);
+  /** Attachments carried over from the forwarded message: { index, name, size }. */
+  let forwarded = $state(initial.forwarded ?? []);
   let error = $state("");
   let editor = $state();
 
@@ -26,7 +31,7 @@
 
   onMount(() => {
     editor.innerHTML =
-      `<p><br></p>${signatureBlock(account)}` + (draft.quote ? `<p><br></p>${draft.quote}` : "");
+      initial.html ?? `<p><br></p>${signatureBlock(account)}` + (initial.quote ? `<p><br></p>${initial.quote}` : "");
     (to ? editor : document.getElementById("compose-to"))?.focus();
   });
 
@@ -70,30 +75,26 @@
     if (!account) return (error = "Add a live account in Settings → Accounts to send mail.");
     if (!split(to).length && !split(cc).length && !split(bcc).length) return (error = "Add at least one recipient.");
     if (!subject.trim() && !confirm("Send without a subject?")) return;
-    sending = true;
-    try {
-      const note = await api.sendMessage(account.id, {
-        to: split(to),
-        cc: split(cc),
-        bcc: split(bcc),
-        subject,
-        html: editor.innerHTML,
-        text: editor.innerText,
-        in_reply_to: draft.in_reply_to ?? null,
-        references: draft.references ?? [],
-        attachments: attachments.map(({ name, content_type, data }) => ({ name, content_type, data })),
-      });
-      onsent(note);
-    } catch (e) {
-      error = String(e);
-    } finally {
-      sending = false;
-    }
+    const mail = {
+      to: split(to),
+      cc: split(cc),
+      bcc: split(bcc),
+      subject,
+      html: editor.innerHTML,
+      text: editor.innerText,
+      in_reply_to: initial.in_reply_to ?? null,
+      references: initial.references ?? [],
+      attachments: attachments.map(({ name, content_type, data }) => ({ name, content_type, data })),
+      forward_from: forwarded.length ? initial.forward_from : null,
+      forward_attachments: forwarded.map((a) => a.index),
+    };
+    const reopen = { ...initial, account_id: account.id, to, cc, bcc, subject, html: editor.innerHTML, attachments, forwarded };
+    onsend(account.id, mail, reopen);
   }
 
   function close() {
     const hasContent = to || subject || editor?.innerText.trim() || attachments.length;
-    if (hasContent && !draft.quote && !confirm("Discard this message?")) return;
+    if (hasContent && !initial.quote && !confirm("Discard this message?")) return;
     onclose();
   }
 
@@ -132,12 +133,12 @@
         </label>
         <label class="field">
           <span>To</span>
-          <input id="compose-to" bind:value={to} placeholder="name@example.com, …" />
+          <RecipientInput id="compose-to" bind:value={to} placeholder="Type a name or address" />
           {#if !showCc}<button class="link" onclick={() => (showCc = true)}>Cc / Bcc</button>{/if}
         </label>
         {#if showCc}
-          <label class="field"><span>Cc</span><input bind:value={cc} /></label>
-          <label class="field"><span>Bcc</span><input bind:value={bcc} /></label>
+          <label class="field"><span>Cc</span><RecipientInput bind:value={cc} /></label>
+          <label class="field"><span>Bcc</span><RecipientInput bind:value={bcc} /></label>
         {/if}
         <label class="field"><span>Subject</span><input bind:value={subject} /></label>
       </div>
@@ -158,8 +159,16 @@
 
       <div class="editor" contenteditable="true" role="textbox" aria-multiline="true" tabindex="0" bind:this={editor}></div>
 
-      {#if attachments.length}
+      {#if attachments.length || forwarded.length}
         <div class="attachments">
+          {#each forwarded as a, i (a.index)}
+            <span class="chip" title="From the forwarded message">
+              <Icon name="forward" size={12} />
+              <span class="ellipsis">{a.name}</span>
+              <span class="muted">{formatSize(a.size)}</span>
+              <button onclick={() => (forwarded = forwarded.filter((_, j) => j !== i))} title="Remove"><Icon name="x" size={12} /></button>
+            </span>
+          {/each}
           {#each attachments as a, i}
             <span class="chip">
               <span class="ellipsis">{a.name}</span>
@@ -171,10 +180,10 @@
       {/if}
 
       <footer>
-        {#if error}<span class="error">{error}</span>{:else if draft.note}<span class="muted">{draft.note}</span>{/if}
+        {#if error}<span class="error">{error}</span>{:else if initial.error}<span class="error">{initial.error}</span>{:else if initial.note}<span class="muted">{initial.note}</span>{/if}
         <span class="grow"></span>
         <span class="muted">Ctrl+Enter</span>
-        <button class="primary" onclick={send} disabled={sending}>{sending ? "Sending…" : "Send"}</button>
+        <button class="primary" onclick={send}>Send</button>
       </footer>
     {/if}
   </div>
@@ -225,6 +234,7 @@
   .attachments { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 18px; border-top: 1px solid var(--border); }
   .chip { display: flex; align-items: center; gap: 6px; max-width: 260px; padding: 4px 6px 4px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
   .chip button { display: grid; place-items: center; color: var(--muted); }
+  .chip .muted { white-space: nowrap; flex-shrink: 0; }
   footer { display: flex; align-items: center; gap: 12px; padding: 10px 18px; border-top: 1px solid var(--border); }
   .primary { padding: 8px 22px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; }
   .primary:disabled { opacity: 0.6; cursor: default; }

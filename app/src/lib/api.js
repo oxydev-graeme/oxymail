@@ -27,6 +27,9 @@ export const api = {
   syncNow: (accountId = null) => invoke("sync_now", { accountId }),
   sendMessage: (accountId, mail) => invoke("send_message", { accountId, mail }),
   liveConfig: (accountId) => invoke("live_config", { accountId }),
+  suggestContacts: (query) => invoke("suggest_contacts", { query }),
+  messagesByRole: (role, offset, limit) => invoke("messages_by_role", { role, offset, limit }),
+  unreadByRole: (role) => invoke("unread_by_role", { role }),
   oauthSignIn: (provider, email) => invoke("oauth_sign_in", { provider, email }),
   oauthClients: () => invoke("oauth_clients"),
   setOAuthClient: (provider, clientId, clientSecret) => invoke("set_oauth_client", { provider, clientId, clientSecret }),
@@ -69,6 +72,8 @@ export const DEFAULT_SETTINGS = {
   theme: "system",
   density: "comfortable",
   mark_read_on_open: "true",
+  notifications: "true",
+  undo_send_seconds: "8",
 };
 
 /** Today: "14:05". This year: "21 Oct". Older: "21 Oct 2023". */

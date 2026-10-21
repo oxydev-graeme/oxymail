@@ -47,6 +47,8 @@ const mock = () => {
     search: () => [], set_flag: () => null,
     live_config: () => ({ email: "graeme@oxydev.co.za", username: "graeme@oxydev.co.za", source: "the provider's autoconfig", oauth: null,
       imap: { host: "mail.oxydev.co.za", port: 993, security: "tls" }, smtp: { host: "mail.oxydev.co.za", port: 465, security: "tls" } }),
+    messages_by_role: () => msgs(100).map((m, k) => ({ ...m, account_id: (k % 6) + 1 })),
+    suggest_contacts: () => [{ email: "paul@sarongi.co.za", name: "Paul McCree" }, { email: "plarkin@topfiremedia.com", name: "Paul Larkin" }, { email: "paul.another@example.com", name: null }],
     oauth_clients: () => ({ google: { client_id: "1234-abc.apps.googleusercontent.com", has_secret: true }, microsoft: { client_id: "", has_secret: false } }),
     connect_suggestion: () => ({ email: "hello@oxydev.co.za", username: "hello@oxydev.co.za", oauth: null,
       source: "your Mailbird settings (POP3 there; OxyMail uses IMAP on the same server)",
@@ -92,6 +94,12 @@ const shots = [
     await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Sign-in")');
     await p.click('.dialog summary >> nth=0');
   }],
+  ["all-inboxes", 1360, 860, "dark", async (p) => { await p.click("button:has-text('All inboxes')"); await p.click(".row-main"); }],
+  ["compose-autocomplete", 1360, 860, "dark", async (p) => {
+    await p.click(".compose-btn"); await p.fill("#compose-to", "pau"); await p.waitForTimeout(400);
+  }],
+  ["forward", 1360, 860, "dark", async (p) => { await p.click(".row-main"); await p.click("button:has-text('Forward')"); }],
+  ["settings-reading", 1360, 860, "light", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Reading & sending")'); }],
   ["add-account-gmail", 1360, 860, "dark", async (p) => {
     await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")');
     await p.click('.dialog button:text-is("Add account")'); await p.fill('input[type="email"]', "hello@oxyaccounting.co.za");

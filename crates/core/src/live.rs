@@ -37,6 +37,16 @@ pub struct MailbirdServer {
 }
 
 #[derive(Debug, Clone)]
+pub struct RemoteRef {
+    pub message_id: i64,
+    pub account_id: i64,
+    pub folder_id: i64,
+    pub remote_name: String,
+    pub uid: u32,
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RemoteFolder {
     pub id: i64,
     pub remote_name: String,
@@ -337,6 +347,94 @@ impl Store {
             if let Some((account, Some(folder), Some(uid))) = found {
                 out.push((account, folder, uid));
             }
+        }
+        Ok(out)
+    }
+
+/// Where a live message sits on its server.
+    pub fn remote_ref(&self, id: i64) -> Result<Option<RemoteRef>> {
+        Ok(self
+            .db
+            .query_row(
+                "select m.id, f.account_id, f.id, f.remote_name, m.uid, f.role from messages m
+                 join folders f on f.id = m.origin_folder_id join accounts a on a.id = f.account_id
+                 where m.id = ?1 and a.kind = 'imap' and m.uid is not null and f.remote_name is not null",
+                [id],
+                |r| {
+                    Ok(RemoteRef {
+                        message_id: r.get(0)?,
+                        account_id: r.get(1)?,
+                        folder_id: r.get(2)?,
+                        remote_name: r.get(3)?,
+                        uid: r.get(4)?,
+                        role: r.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// The local folder mirroring a server folder, if it has been synced.
+    pub fn folder_by_remote(&self, account_id: i64, remote_name: &str) -> Result<Option<i64>> {
+        Ok(self
+            .db
+            .query_row(
+                "select id from folders where account_id = ?1 and remote_name = ?2",
+                params![account_id, remote_name],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn folder_remote_name(&self, folder_id: i64) -> Result<Option<String>> {
+        Ok(self.db.query_row("select remote_name from folders where id = ?1", [folder_id], |r| r.get(0))?)
+    }
+
+    /// After messages moved on the server: archive mail follows to `target` (unlinked from its
+    /// old UID, to be re-linked when the target syncs); downloaded copies are dropped and come
+    /// back from the target folder on the next sync.
+    pub fn apply_remote_move(&mut self, ids: &[i64], target: Option<i64>) -> Result<()> {
+        let tx = self.db.transaction()?;
+        for id in ids {
+            let from_archive: bool = tx.query_row("select from_archive from messages where id = ?1", [id], |r| r.get(0))?;
+            match (from_archive, target) {
+                (true, Some(folder)) => {
+                    tx.execute("update messages set folder_id = ?1, uid = null where id = ?2", params![folder, id])?;
+                }
+                _ => {
+                    tx.execute("update messages set deleted = 1 where id = ?1", [id])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Messages can be re-created by a move (new UID, new row). Maps ids that are now hidden
+    /// to the visible copy with the same Message-ID in the same account.
+    pub fn resolve_current(&self, ids: &[i64]) -> Result<Vec<i64>> {
+        let mut out = Vec::new();
+        for id in ids {
+            let (deleted, message_id, account): (bool, Option<String>, i64) = self.db.query_row(
+                "select m.deleted, m.message_id, f.account_id from messages m join folders f on f.id = m.folder_id where m.id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            let current = match (deleted, message_id) {
+                (true, Some(mid)) => self
+                    .db
+                    .query_row(
+                        "select m.id from messages m join folders f on f.id = m.folder_id
+                         where f.account_id = ?1 and m.message_id = ?2 and m.deleted = 0
+                         order by m.uid is null, m.id desc limit 1",
+                        params![account, mid],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(*id),
+                _ => *id,
+            };
+            out.push(current);
         }
         Ok(out)
     }

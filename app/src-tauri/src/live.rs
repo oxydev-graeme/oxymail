@@ -170,6 +170,9 @@ pub async fn sync_accounts(app: AppHandle, only: Option<i64>) {
             .map_err(full)
         }
         .await;
+        if let Ok(report) = &result {
+            notify_new_mail(&app, &store, &account.email, report);
+        }
         let payload = match result {
             Ok(report) => json!({ "account_id": account.id, "report": report }),
             Err(error) => json!({ "account_id": account.id, "error": error }),
@@ -181,11 +184,43 @@ pub async fn sync_accounts(app: AppHandle, only: Option<i64>) {
     }
 }
 
+/// A desktop notification for new Inbox mail, unless turned off in Settings.
+fn notify_new_mail(app: &AppHandle, store: &Store, account: &str, report: &imap::SyncReport) {
+    use tauri_plugin_notification::NotificationExt;
+    if report.new_inbox == 0 || store.settings().ok().and_then(|s| s.get("notifications").cloned()).as_deref() == Some("false") {
+        return;
+    }
+    let (title, body) = match report.new_inbox_preview.as_slice() {
+        [(from, subject)] if report.new_inbox == 1 => (from.clone(), subject.clone()),
+        previews => (
+            format!("{} new messages · {account}", report.new_inbox),
+            previews.iter().map(|(f, s)| format!("{f}: {s}")).collect::<Vec<_>>().join("\n"),
+        ),
+    };
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
 /// Sends a message from a live account, files it in Sent, then syncs that account.
 #[tauri::command]
-pub async fn send_message(app: AppHandle, state: State<'_, AppState>, account_id: i64, mail: Outgoing) -> Res<String> {
+pub async fn send_message(app: AppHandle, state: State<'_, AppState>, account_id: i64, mut mail: Outgoing) -> Res<String> {
     let (config, sender_name) = {
         let store = state.0.lock().map_err(err)?;
+        if let Some(original) = mail.forward_from {
+            use base64::Engine;
+            for index in mail.forward_attachments.clone() {
+                let (name, data) = store.attachment(original, index).map_err(err)?;
+                let content_type = store
+                    .message(original)
+                    .ok()
+                    .and_then(|v| v.attachments.into_iter().find(|a| a.index == index).map(|a| a.content_type))
+                    .unwrap_or_else(|| "application/octet-stream".into());
+                mail.attachments.push(oxymail_sync::smtp::OutgoingAttachment {
+                    name,
+                    content_type,
+                    data: base64::engine::general_purpose::STANDARD.encode(data),
+                });
+            }
+        }
         let live = store.live_account(account_id).map_err(err)?.ok_or("only live accounts can send")?;
         let sender = store
             .accounts()
@@ -198,6 +233,10 @@ pub async fn send_message(app: AppHandle, state: State<'_, AppState>, account_id
     let password = oxymail_sync::credential(&config).await.map_err(full)?;
     let raw = smtp::build(sender_name.as_deref(), &config.email, &mail).map_err(full)?;
     smtp::send(&config, &password, &mail, &raw).await.map_err(full)?;
+    if let Ok(store) = state.0.lock() {
+        let everyone: Vec<String> = mail.to.iter().chain(&mail.cc).chain(&mail.bcc).cloned().collect();
+        let _ = store.note_sent_to(&everyone);
+    }
 
     // Gmail files sent mail by itself; everyone else needs an APPEND.
     let mut note = "Sent".to_string();
@@ -244,13 +283,119 @@ pub fn push_flags(app: &AppHandle, store: &Store, ids: &[i64], flag: char, on: b
     });
 }
 
-/// Refuses moves and deletes on live mail until two-way sync lands, so the index never
-/// disagrees with the server.
-pub fn refuse_live(store: &Store, ids: &[i64]) -> Res<()> {
-    if !store.remote_refs(ids).map_err(err)?.is_empty() {
-        return Err("Archiving, deleting and moving live mail arrive in the next update. \
-                    For now these work on archive accounts only."
-            .into());
+/// What an action asks of each message.
+enum Action {
+    /// To the account folder with this role (`inbox`, `archive`, `trash`).
+    Role(&'static str),
+    /// To a specific folder (undo, or moving to a chosen folder).
+    Folder(i64),
+    /// To Trash, or permanently when already in Trash.
+    Delete,
+    /// Back to where it was imported from, or the Inbox.
+    Restore,
+}
+
+#[tauri::command]
+pub async fn move_to(app: AppHandle, state: State<'_, AppState>, ids: Vec<i64>, role: String) -> Res<()> {
+    let role = match role.as_str() {
+        "inbox" => "inbox",
+        "archive" => "archive",
+        _ => return Err(format!("cannot move to {role}")),
+    };
+    act(&app, &state, ids, Action::Role(role)).await
+}
+
+#[tauri::command]
+pub async fn move_to_folder(app: AppHandle, state: State<'_, AppState>, ids: Vec<i64>, folder_id: i64) -> Res<()> {
+    act(&app, &state, ids, Action::Folder(folder_id)).await
+}
+
+#[tauri::command]
+pub async fn delete(app: AppHandle, state: State<'_, AppState>, ids: Vec<i64>) -> Res<()> {
+    act(&app, &state, ids, Action::Delete).await
+}
+
+#[tauri::command]
+pub async fn restore(app: AppHandle, state: State<'_, AppState>, ids: Vec<i64>) -> Res<()> {
+    act(&app, &state, ids, Action::Restore).await
+}
+
+/// Applies an action. Archive-only messages change in the index; messages on a server are
+/// moved or deleted there first, then the affected folders are re-synced so the index matches.
+async fn act(app: &AppHandle, state: &State<'_, AppState>, ids: Vec<i64>, action: Action) -> Res<()> {
+    let (local, remote) = {
+        let store = state.0.lock().map_err(err)?;
+        let ids = store.resolve_current(&ids).map_err(err)?;
+        let mut local = Vec::new();
+        let mut remote: BTreeMap<(i64, String), Vec<oxymail_core::RemoteRef>> = BTreeMap::new();
+        for id in ids {
+            match store.remote_ref(id).map_err(err)? {
+                Some(r) => remote.entry((r.account_id, r.remote_name.clone())).or_default().push(r),
+                None => local.push(id),
+            }
+        }
+        (local, remote)
+    };
+
+    if !local.is_empty() {
+        let mut store = state.0.lock().map_err(err)?;
+        match &action {
+            Action::Role(role) => store.move_to_role(&local, role),
+            Action::Folder(folder) => store.move_to_folder(&local, *folder),
+            Action::Delete => store.delete(&local),
+            Action::Restore => store.restore(&local),
+        }
+        .map_err(err)?;
+    }
+
+    for ((account_id, source), refs) in remote {
+        let config = {
+            let store = state.0.lock().map_err(err)?;
+            config_of(&store.live_account(account_id).map_err(err)?.ok_or("account missing")?.config)?
+        };
+        let secret = oxymail_sync::credential(&config).await.map_err(full)?;
+        let uids: Vec<u32> = refs.iter().map(|r| r.uid).collect();
+        let ids: Vec<i64> = refs.iter().map(|r| r.message_id).collect();
+        let in_trash = refs.first().and_then(|r| r.role.as_deref()) == Some("trash");
+
+        let mut session = imap::connect(&config, &secret).await.map_err(full)?;
+        let target: Option<String> = match &action {
+            Action::Delete if in_trash => {
+                imap::delete_messages(&mut session, &source, &uids).await.map_err(full)?;
+                None
+            }
+            _ => {
+                let target = match &action {
+                    Action::Role(role) => imap::folder_for_role(&mut session, role).await,
+                    Action::Delete => imap::folder_for_role(&mut session, "trash").await,
+                    Action::Restore => imap::folder_for_role(&mut session, "inbox").await,
+                    Action::Folder(folder) => {
+                        let name = state.0.lock().map_err(err)?.folder_remote_name(*folder).map_err(err)?;
+                        name.ok_or_else(|| anyhow::anyhow!("that folder only exists in the archive, not on the server"))
+                    }
+                }
+                .map_err(full)?;
+                imap::move_messages(&mut session, &source, &uids, &target).await.map_err(full)?;
+                Some(target)
+            }
+        };
+        let _ = session.logout().await;
+
+        {
+            let mut store = state.0.lock().map_err(err)?;
+            let target_folder = match &target {
+                Some(name) => store.folder_by_remote(account_id, name).map_err(err)?,
+                None => None,
+            };
+            store.apply_remote_move(&ids, target_folder).map_err(err)?;
+        }
+        // Bring the moved copies in now, so the target folder and Undo see them straight away.
+        let mut folders = vec![source.clone()];
+        folders.extend(target);
+        if let Ok(mut store) = Store::open(&Store::default_path()) {
+            let _ = imap::sync_folders(&mut store, account_id, &config, &secret, Some(&folders), |_| {}).await;
+        }
+        let _ = app.emit("mail-changed", json!({ "account_id": account_id }));
     }
     Ok(())
 }
@@ -302,8 +447,11 @@ pub fn oauth_clients(state: State<'_, AppState>) -> Res<BTreeMap<String, OAuthCl
     Ok(PROVIDERS
         .iter()
         .map(|p| {
-            let client_id = settings.get(&format!("oauth_{p}_client_id")).cloned().unwrap_or_default();
-            (p.to_string(), OAuthClientInfo { client_id, has_secret: secrets::client_secret(p).is_some() })
+            let configured = settings.get(&format!("oauth_{p}_client_id")).cloned().unwrap_or_default();
+            let built_in = built_in_client(p);
+            let client_id = if configured.is_empty() { built_in.as_ref().map(|c| c.id.clone()).unwrap_or_default() } else { configured.clone() };
+            let has_secret = secrets::client_secret(p).is_some() || (configured.is_empty() && built_in.is_some_and(|c| c.secret.is_some()));
+            (p.to_string(), OAuthClientInfo { client_id, has_secret })
         })
         .collect())
 }
@@ -324,9 +472,25 @@ pub fn set_oauth_client(state: State<'_, AppState>, provider: String, client_id:
 }
 
 /// Hands a provider's client from settings and keyring to the sync crate.
+/// Client registrations compiled into this copy (from `oauth.local.env` at install time), used
+/// when nothing is set in Settings → Sign-in.
+fn built_in_client(provider: &str) -> Option<oxymail_sync::oauth::Client> {
+    let (id, secret) = match provider {
+        "google" => (option_env!("OXYMAIL_GOOGLE_CLIENT_ID"), option_env!("OXYMAIL_GOOGLE_CLIENT_SECRET")),
+        "microsoft" => (option_env!("OXYMAIL_MICROSOFT_CLIENT_ID"), None),
+        _ => (None, None),
+    };
+    id.filter(|i| !i.is_empty())
+        .map(|id| oxymail_sync::oauth::Client { id: id.to_string(), secret: secret.filter(|s| !s.is_empty()).map(str::to_string) })
+}
+
 pub fn load_oauth_client(store: &Store, provider: &str) {
     let id = store.settings().ok().and_then(|s| s.get(&format!("oauth_{provider}_client_id")).cloned()).unwrap_or_default();
-    let client = (!id.is_empty()).then(|| oxymail_sync::oauth::Client { id, secret: secrets::client_secret(provider) });
+    let client = if id.is_empty() {
+        built_in_client(provider)
+    } else {
+        Some(oxymail_sync::oauth::Client { id, secret: secrets::client_secret(provider) })
+    };
     oxymail_sync::oauth::set_client(provider, client);
 }
 
