@@ -89,6 +89,7 @@ const mock = () => {
     ],
     person: () => ({ id: 1, full_name: "Paul McCree", first_name: "Paul", last_name: "McCree", org: "Sarongi", title: "Director", notes: "Met at the Cape Town expo.", birthday: "1981-01-19", photo: null, groups: "Clients", fields: [{ kind: "email", label: "Home", value: "paul@sarongi.co.za" }, { kind: "phone", label: "Mobile", value: "082-575-6646" }, { kind: "url", label: "Home Page", value: "https://sarongi.co.za" }] }),
     "plugin:app|version": () => "0.2.0",
+    "plugin:updater|check": () => (window.__UPDATE__ ? { rid: 1, currentVersion: "0.2.0", version: "0.3.1", date: null, body: "New branding", rawJson: {} } : null),
     oauth_clients: () => ({ google: { client_id: "1234-abc.apps.googleusercontent.com", has_secret: true }, microsoft: { client_id: "", has_secret: false } }),
     connect_suggestion: () => ({ email: "hello@oxydev.co.za", username: "hello@oxydev.co.za", oauth: null,
       source: "your Mailbird settings (POP3 there; OxyMail uses IMAP on the same server)",
@@ -166,6 +167,11 @@ const shots = [
   ["event-editor", 1360, 860, "dark", async (p) => { await p.click(".modes button:has-text('Calendar')"); await p.click("button:has-text('New event')"); }],
   ["contacts", 1360, 860, "dark", async (p) => { await p.click(".modes button:has-text('Contacts')"); await p.click("li button >> nth=0"); }],
   ["contact-edit", 1360, 860, "light", async (p) => { await p.click(".modes button:has-text('Contacts')"); await p.click("li button >> nth=0"); await p.click(".card button:has-text('Edit')"); }],
+  ["about-update", 1360, 860, "dark", async (p) => {
+    await p.evaluate(() => (window.__UPDATE__ = true));
+    await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("About")');
+    await p.click("button:has-text('Check for updates')"); await p.waitForTimeout(300);
+  }],
   ["about", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("About")'); }],
   ["shortcuts", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Shortcuts & search")'); await p.locator(".content").evaluate((el) => (el.scrollTop = 400)); }],
   ["add-account-gmail", 1360, 860, "dark", async (p) => {

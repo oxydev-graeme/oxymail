@@ -34,7 +34,10 @@
   async function checkUpdates(quiet = true) {
     try {
       update = await findUpdate();
-      if (!quiet) flash(update ? `OxyMail ${update.version} is available` : "OxyMail is up to date");
+      if (!quiet) {
+        if (update) flash(`OxyMail ${update.version} is available`, applyUpdate, 20000, "Install");
+        else flash("OxyMail is up to date");
+      }
     } catch (e) {
       if (!quiet) error = `Couldn't check for updates: ${e}`;
     }
@@ -790,9 +793,10 @@
     }
   }
 
-  function flash(message, undo = null, ms = 6000) {
+  /** A short message, optionally with an action button (`label`, default "Undo"). */
+  function flash(message, undo = null, ms = 6000, label = "Undo") {
     clearTimeout(toastTimer);
-    toast = { message, undo };
+    toast = { message, undo, label };
     toastTimer = setTimeout(() => (toast = null), ms);
   }
 
@@ -1230,6 +1234,9 @@
     onclose={() => (showSettings = false)}
     onimported={loadAccounts}
     oncheckupdates={() => checkUpdates(false)}
+    {update}
+    {updating}
+    oninstallupdate={() => { showSettings = false; applyUpdate(); }}
     onaccountschanged={loadAccounts}
   />
 {/if}
@@ -1262,7 +1269,7 @@
   <div class="toast">
     <span>{toast.message}</span>
     {#if toast.undo}
-      <button onclick={() => { const u = toast.undo; toast = null; u(); }}>Undo</button>
+      <button onclick={() => { const u = toast.undo; toast = null; u(); }}>{toast.label ?? "Undo"}</button>
     {/if}
   </div>
 {/if}

@@ -6,7 +6,7 @@
   import AccountsSettings from "./AccountsSettings.svelte";
   import SignInSettings from "./SignInSettings.svelte";
 
-  let { settings, accounts, onchange, onclose, onimported, onaccountschanged, oncheckupdates } = $props();
+  let { settings, accounts, onchange, onclose, onimported, onaccountschanged, oncheckupdates, update = null, updating = null, oninstallupdate } = $props();
   let version = $state("");
 
   let section = $state("appearance");
@@ -209,7 +209,13 @@
           <p class="tagline">Email with room to breathe.</p>
           <p class="hint">Version {version || "…"} · GPL-3.0</p>
           <div class="update-row">
-            <button class="primary" onclick={oncheckupdates}>Check for updates</button>
+            {#if update}
+              <button class="primary" onclick={oninstallupdate} disabled={updating !== null}>
+                {updating === null ? `Install ${update.version} and restart` : `Updating… ${Math.round(updating * 100)}%`}
+              </button>
+            {:else}
+              <button class="primary" onclick={oncheckupdates}>Check for updates</button>
+            {/if}
           </div>
           <label class="toggle centered">
             <input
