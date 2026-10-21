@@ -1,6 +1,8 @@
 # OxyMail
 
-*Email with room to breathe.* An email client with calendar and contacts for **Windows, macOS and Linux**, built in Rust with [Tauri](https://tauri.app).
+*Email with room to breathe.* **[getoxymail.com](https://getoxymail.com)**
+
+An email client with calendar and contacts for **Windows, macOS and Linux**, built in Rust with [Tauri](https://tauri.app).
 
 ## Features
 

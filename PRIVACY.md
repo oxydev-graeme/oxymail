@@ -2,7 +2,7 @@
 
 *Last updated: 21 October 2026*
 
-OxyMail is a desktop email client that runs on your own computer. This policy explains what it does with your data.
+OxyMail is a desktop email client that runs on your own computer. This policy explains what it does with your data. It's also published at <https://getoxymail.com/privacy>.
 
 ## Where your mail lives
 
