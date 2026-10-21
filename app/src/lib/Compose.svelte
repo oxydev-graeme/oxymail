@@ -156,6 +156,77 @@
     }
   }
 
+  // ---- Window geometry: drag by the header, resize from any edge, maximise ----
+  const GEOMETRY_KEY = "oxymail.compose.geometry";
+  const MIN_W = 480, MIN_H = 360, MARGIN = 8;
+  let maximized = $state(false);
+  let box = $state(loadGeometry());
+
+  function loadGeometry() {
+    let saved = null;
+    try {
+      saved = JSON.parse(localStorage.getItem(GEOMETRY_KEY) ?? "null");
+    } catch {}
+    if (saved?.maximized) maximized = true;
+    const w = Math.min(saved?.w ?? 820, innerWidth * 0.94);
+    const h = Math.min(saved?.h ?? 680, innerHeight * 0.9);
+    return clamp({ x: saved?.x ?? (innerWidth - w) / 2, y: saved?.y ?? (innerHeight - h) / 2, w, h });
+  }
+
+  function saveGeometry() {
+    try {
+      localStorage.setItem(GEOMETRY_KEY, JSON.stringify({ ...box, maximized }));
+    } catch {}
+  }
+
+  /** Keeps the window on screen and no smaller than the minimum. */
+  function clamp({ x, y, w, h }) {
+    w = Math.max(Math.min(w, innerWidth - 2 * MARGIN), Math.min(MIN_W, innerWidth - 2 * MARGIN));
+    h = Math.max(Math.min(h, innerHeight - 2 * MARGIN), Math.min(MIN_H, innerHeight - 2 * MARGIN));
+    x = Math.min(Math.max(x, MARGIN), innerWidth - w - MARGIN);
+    y = Math.min(Math.max(y, MARGIN), innerHeight - h - MARGIN);
+    return { x, y, w, h };
+  }
+
+  /** Starts a move (edges = "") or a resize from the given edges ("n", "se", …). */
+  function startDrag(event, edges = "") {
+    if (event.button !== 0 || maximized) return;
+    if (!edges && event.target.closest("button")) return;
+    event.preventDefault();
+    const start = { px: event.clientX, py: event.clientY, ...box };
+    const el = event.currentTarget;
+    el.setPointerCapture(event.pointerId);
+    const move = (e) => {
+      const dx = e.clientX - start.px, dy = e.clientY - start.py;
+      if (!edges) {
+        box = clamp({ ...start, x: start.x + dx, y: start.y + dy });
+        return;
+      }
+      let { x, y, w, h } = start;
+      if (edges.includes("e")) w = Math.max(MIN_W, start.w + dx);
+      if (edges.includes("s")) h = Math.max(MIN_H, start.h + dy);
+      if (edges.includes("w")) { w = Math.max(MIN_W, start.w - dx); x = start.x + start.w - w; }
+      if (edges.includes("n")) { h = Math.max(MIN_H, start.h - dy); y = start.y + start.h - h; }
+      box = clamp({ x, y, w, h });
+    };
+    const end = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", end);
+      el.removeEventListener("pointercancel", end);
+      saveGeometry();
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", end);
+    el.addEventListener("pointercancel", end);
+  }
+
+  function toggleMaximized() {
+    maximized = !maximized;
+    saveGeometry();
+  }
+
+  const EDGES = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
+
   function onKey(event) {
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
@@ -166,14 +237,33 @@
   }
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window onkeydown={onKey} onresize={() => (box = clamp(box))} />
 
 <div class="backdrop">
-  <div class="compose" role="dialog" aria-label="New message">
-    <header>
+  <div
+    class="compose"
+    class:maximized
+    role="dialog"
+    aria-label="New message"
+    style:left="{box.x}px"
+    style:top="{box.y}px"
+    style:width="{box.w}px"
+    style:height="{box.h}px"
+  >
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <header onpointerdown={(e) => startDrag(e)} ondblclick={(e) => !e.target.closest("button") && toggleMaximized()}>
       <span class="title">{subject || "New message"}</span>
+      <button class="icon" onclick={toggleMaximized} title={maximized ? "Restore size" : "Maximise"}>
+        <Icon name={maximized ? "unmaximize" : "maximize"} size={16} />
+      </button>
       <button class="icon" onclick={close} title="Close and keep as draft (Esc)"><Icon name="x" /></button>
     </header>
+    {#if !maximized}
+      {#each EDGES as edge}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="grip {edge}" onpointerdown={(e) => startDrag(e, edge)}></div>
+      {/each}
+    {/if}
 
     {#if !accounts.length}
       <div class="empty">
@@ -254,20 +344,28 @@
 {/if}
 
 <style>
-  .backdrop { position: fixed; inset: 0; display: grid; place-items: center; background: rgb(10 14 20 / 0.4); z-index: 25; }
+  .backdrop { position: fixed; inset: 0; background: rgb(10 14 20 / 0.25); z-index: 25; }
   .compose {
+    position: absolute;
     display: flex;
     flex-direction: column;
-    width: min(820px, 94vw);
-    height: min(680px, 90vh);
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 12px;
     box-shadow: 0 20px 60px rgb(0 0 0 / 0.3);
     overflow: hidden;
   }
-  header { display: flex; align-items: center; gap: 10px; padding: 10px 12px 10px 18px; border-bottom: 1px solid var(--border); background: var(--header); }
-  .title { flex: 1; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .compose.maximized { left: 8px !important; top: 8px !important; width: calc(100% - 16px) !important; height: calc(100% - 16px) !important; }
+  header { display: flex; align-items: center; gap: 6px; padding: 10px 12px 10px 18px; border-bottom: 1px solid var(--border); background: var(--header); cursor: move; user-select: none; touch-action: none; }
+  .maximized header { cursor: default; }
+  .grip { position: absolute; z-index: 2; touch-action: none; }
+  .grip.n, .grip.s { left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
+  .grip.e, .grip.w { top: 10px; bottom: 10px; width: 6px; cursor: ew-resize; }
+  .grip.n { top: 0; } .grip.s { bottom: 0; } .grip.e { right: 0; } .grip.w { left: 0; }
+  .grip.ne, .grip.nw, .grip.se, .grip.sw { width: 12px; height: 12px; }
+  .grip.ne { top: 0; right: 0; cursor: nesw-resize; } .grip.sw { bottom: 0; left: 0; cursor: nesw-resize; }
+  .grip.nw { top: 0; left: 0; cursor: nwse-resize; } .grip.se { bottom: 0; right: 0; cursor: nwse-resize; }
+  .title { flex: 1; margin-right: 4px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .icon { display: grid; place-items: center; padding: 4px; border-radius: 6px; color: var(--muted); }
   .icon:hover { background: var(--hover); color: var(--text); }
   .fields { padding: 4px 18px; border-bottom: 1px solid var(--border); }

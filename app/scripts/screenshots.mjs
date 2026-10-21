@@ -180,6 +180,14 @@ const shots = [
     await p.click('.dialog button:text-is("Continue")'); await p.click('.dialog button:text-is("Edit server settings")');
   }],
   ["compose", 1360, 860, "dark", async (p) => { await p.click(".row-main"); await p.click("button:has-text('Reply all')"); }],
+  ["compose-moved", 1360, 860, "dark", async (p) => {
+    await p.click(".compose-btn");
+    const h = await p.locator(".compose header").boundingBox();
+    await p.mouse.move(h.x + 200, h.y + 15); await p.mouse.down(); await p.mouse.move(h.x - 80, h.y - 60, { steps: 8 }); await p.mouse.up();
+    const g = await p.locator(".grip.se").boundingBox();
+    await p.mouse.move(g.x + 6, g.y + 6); await p.mouse.down(); await p.mouse.move(g.x - 200, g.y - 150, { steps: 8 }); await p.mouse.up();
+  }],
+  ["compose-maximized", 1360, 860, "dark", async (p) => { await p.click(".compose-btn"); await p.click(".compose header button[title='Maximise']"); }],
 ];
 for (const [name, w, h, theme, act] of shots) {
   const page = await browser.newPage({ viewport: { width: w, height: h }, colorScheme: theme });
