@@ -489,6 +489,7 @@ mod tests {
         assert_eq!(store.message(old)?.subject.as_deref(), Some("Old archived"));
         assert_eq!(store.import_archive(&dir.join("export/mail"), |_| {})?.added, 0);
         assert_eq!(store.accounts()?.len(), 1, "re-import must not create a second account");
+        drop(store); // Windows won't delete a database that is still open.
         fs::remove_dir_all(&dir)?;
         Ok(())
     }

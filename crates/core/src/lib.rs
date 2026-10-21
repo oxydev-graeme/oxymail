@@ -1574,6 +1574,7 @@ mod tests {
 
         store.set_setting("theme", "dark")?;
         assert_eq!(store.settings()?.get("theme").map(String::as_str), Some("dark"));
+        drop(store); // Windows won't delete a database that is still open.
         fs::remove_dir_all(&dir)?;
         Ok(())
     }

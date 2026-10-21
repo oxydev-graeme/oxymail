@@ -881,6 +881,7 @@ mod tests {
         assert_eq!(found[0].email.as_deref(), Some("paul@sarongi.co.za"));
         let p = store.person(found[0].id)?;
         assert_eq!(p.fields.iter().find(|f| f.kind == "phone").and_then(|f| f.label.clone()).as_deref(), Some("Cell"));
+        drop(store); // Windows won't delete a database that is still open.
         fs::remove_dir_all(&dir)?;
         Ok(())
     }
