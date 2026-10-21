@@ -32,3 +32,7 @@ Main crates: `async-imap` / `imap-codec`, `lettre`, `mail-parser`, `mail-builder
 ## Clean-room notice
 
 OxyMail is an independent project and is not affiliated with Mailbird. It contains no Mailbird code. The importer reads data files the user already owns, so they can move that data to another app.
+
+## Licence
+
+GPL-3.0. See [LICENSE](LICENSE).
