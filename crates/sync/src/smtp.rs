@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use lettre::address::Envelope;
-use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{Address, AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address as MailAddress;
@@ -86,9 +86,7 @@ pub async fn send(config: &AccountConfig, password: &str, mail: &Outgoing, raw: 
         Security::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp.host)?,
         Security::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp.host)?,
     };
-    let transport: AsyncSmtpTransport<Tokio1Executor> = builder
-        .port(config.smtp.port)
-        .credentials(Credentials::new(config.username.clone(), password.to_string()))
+    let transport: AsyncSmtpTransport<Tokio1Executor> = with_auth(builder.port(config.smtp.port), config, password)
         .timeout(Some(std::time::Duration::from_secs(60)))
         .build();
     transport.send_raw(&envelope, raw).await.context("the server refused the message")?;
@@ -101,15 +99,23 @@ pub async fn test_login(config: &AccountConfig, password: &str) -> Result<()> {
         Security::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp.host)?,
         Security::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp.host)?,
     };
-    let transport: AsyncSmtpTransport<Tokio1Executor> = builder
-        .port(config.smtp.port)
-        .credentials(Credentials::new(config.username.clone(), password.to_string()))
+    let transport: AsyncSmtpTransport<Tokio1Executor> = with_auth(builder.port(config.smtp.port), config, password)
         .timeout(Some(std::time::Duration::from_secs(30)))
         .build();
     if !transport.test_connection().await.context("SMTP login failed")? {
         bail!("the SMTP server didn't accept the connection");
     }
     Ok(())
+}
+
+/// Password login, or XOAUTH2 with the access token when the account uses OAuth.
+fn with_auth(
+    builder: lettre::transport::smtp::AsyncSmtpTransportBuilder,
+    config: &AccountConfig,
+    secret: &str,
+) -> lettre::transport::smtp::AsyncSmtpTransportBuilder {
+    let builder = builder.credentials(Credentials::new(config.username.clone(), secret.to_string()));
+    if config.auth.is_some() { builder.authentication(vec![Mechanism::Xoauth2]) } else { builder }
 }
 
 fn strip(id: &str) -> String {

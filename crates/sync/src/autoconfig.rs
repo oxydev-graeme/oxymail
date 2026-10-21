@@ -31,8 +31,11 @@ pub struct AccountConfig {
     pub smtp: Server,
     /// Where the settings came from, shown to the user.
     pub source: String,
-    /// Set when the provider needs OAuth (Gmail, Microsoft); password login won't work.
+    /// Set when the provider supports OAuth sign-in (`google`, `microsoft`).
     pub oauth: Option<String>,
+    /// How to sign in: `None` for a password, or the provider id when signed in with OAuth.
+    #[serde(default)]
+    pub auth: Option<String>,
 }
 
 pub async fn discover(email: &str) -> Result<AccountConfig> {
@@ -111,7 +114,7 @@ pub fn parse(xml: &str, email: &str, source: &str) -> Option<AccountConfig> {
     let (imap, username, imap_oauth) = pick("incomingServer", "imap")?;
     let (smtp, _, _) = pick("outgoingServer", "smtp")?;
     let oauth = imap_oauth.then(|| oauth_provider(&imap.host)).flatten();
-    Some(AccountConfig { email: email.to_string(), username, imap, smtp, source: source.to_string(), oauth })
+    Some(AccountConfig { email: email.to_string(), username, imap, smtp, source: source.to_string(), oauth, auth: None })
 }
 
 fn oauth_provider(host: &str) -> Option<String> {
@@ -152,6 +155,7 @@ fn guess(email: &str, domain: &str) -> AccountConfig {
         smtp: Server { host, port: 465, security: Security::Tls },
         source: "a guess (please check)".to_string(),
         oauth: None,
+        auth: None,
     }
 }
 

@@ -47,6 +47,7 @@ const mock = () => {
     search: () => [], set_flag: () => null,
     live_config: () => ({ email: "graeme@oxydev.co.za", username: "graeme@oxydev.co.za", source: "the provider's autoconfig", oauth: null,
       imap: { host: "mail.oxydev.co.za", port: 993, security: "tls" }, smtp: { host: "mail.oxydev.co.za", port: 465, security: "tls" } }),
+    oauth_clients: () => ({ google: { client_id: "1234-abc.apps.googleusercontent.com", has_secret: true }, microsoft: { client_id: "", has_secret: false } }),
     connect_suggestion: () => ({ email: "hello@oxydev.co.za", username: "hello@oxydev.co.za", oauth: null,
       source: "your Mailbird settings (POP3 there; OxyMail uses IMAP on the same server)",
       imap: { host: "mail.oxydev.co.za", port: 993, security: "tls" }, smtp: { host: "mail.oxydev.co.za", port: 465, security: "tls" } }),
@@ -86,6 +87,10 @@ const shots = [
     await p.locator(".accounts li", { hasText: "hello@oxydev.co.za" }).locator("button.edit").click();
     await p.click('.dialog button:text-is("Set up sending and receiving")');
     await p.waitForTimeout(200); await p.locator(".content").evaluate((el) => (el.scrollTop = 560));
+  }],
+  ["signin-settings", 1360, 860, "dark", async (p) => {
+    await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Sign-in")');
+    await p.click('.dialog summary >> nth=0');
   }],
   ["add-account-gmail", 1360, 860, "dark", async (p) => {
     await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")');

@@ -41,7 +41,8 @@ async fn tls(server: &Server, tcp: TcpStream) -> Result<TlsStream<TcpStream>> {
     Ok(tls_connector().connect(name, tcp).await.with_context(|| format!("TLS handshake with {}", server.host))?)
 }
 
-/// Connects and logs in.
+/// Connects and signs in. `password` is the account password, or the OAuth access token when
+/// `config.auth` is set.
 pub async fn connect(config: &AccountConfig, password: &str) -> Result<ImapSession> {
     let server = &config.imap;
     let tcp = timeout(NETWORK_TIMEOUT, TcpStream::connect((server.host.as_str(), server.port)))
@@ -63,11 +64,33 @@ pub async fn connect(config: &AccountConfig, password: &str) -> Result<ImapSessi
     if server.security == Security::Tls {
         client.read_response().await?.context("server closed the connection")?;
     }
-    let session = timeout(NETWORK_TIMEOUT, client.login(&config.username, password))
-        .await
-        .map_err(|_| anyhow!("timed out logging in"))?
-        .map_err(|(e, _)| anyhow!("login failed: {e}"))?;
+    let session = if config.auth.is_some() {
+        let auth = XOAuth2 { response: crate::oauth::xoauth2(&config.username, password), sent: false };
+        timeout(NETWORK_TIMEOUT, client.authenticate("XOAUTH2", auth))
+            .await
+            .map_err(|_| anyhow!("timed out signing in"))?
+            .map_err(|(e, _)| anyhow!("sign-in was refused: {e}"))?
+    } else {
+        timeout(NETWORK_TIMEOUT, client.login(&config.username, password))
+            .await
+            .map_err(|_| anyhow!("timed out logging in"))?
+            .map_err(|(e, _)| anyhow!("login failed: {e}"))?
+    };
     Ok(session)
+}
+
+/// XOAUTH2 sends its token once; if the server answers with an error challenge, an empty
+/// reply ends the exchange so the server reports the failure.
+struct XOAuth2 {
+    response: String,
+    sent: bool,
+}
+
+impl async_imap::Authenticator for XOAuth2 {
+    type Response = String;
+    fn process(&mut self, _challenge: &[u8]) -> String {
+        if std::mem::replace(&mut self.sent, true) { String::new() } else { self.response.clone() }
+    }
 }
 
 pub struct FolderInfo {

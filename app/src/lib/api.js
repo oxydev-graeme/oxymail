@@ -27,6 +27,9 @@ export const api = {
   syncNow: (accountId = null) => invoke("sync_now", { accountId }),
   sendMessage: (accountId, mail) => invoke("send_message", { accountId, mail }),
   liveConfig: (accountId) => invoke("live_config", { accountId }),
+  oauthSignIn: (provider, email) => invoke("oauth_sign_in", { provider, email }),
+  oauthClients: () => invoke("oauth_clients"),
+  setOAuthClient: (provider, clientId, clientSecret) => invoke("set_oauth_client", { provider, clientId, clientSecret }),
   connectSuggestion: (accountId) => invoke("connect_suggestion", { accountId }),
   connectArchive: (accountId, config, password) => invoke("connect_archive", { accountId, config, password }),
   updateServerSettings: (accountId, config, password) =>
@@ -131,3 +134,5 @@ export function quotableHtml(html) {
 
 export const escapeHtml = (text) =>
   text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+export const PROVIDER_NAMES = { google: "Google", microsoft: "Microsoft" };

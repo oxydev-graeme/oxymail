@@ -4,6 +4,7 @@
   import Icon from "./Icon.svelte";
   import Logo from "./Logo.svelte";
   import AccountsSettings from "./AccountsSettings.svelte";
+  import SignInSettings from "./SignInSettings.svelte";
 
   let { settings, accounts, onchange, onclose, onimported, onaccountschanged } = $props();
 
@@ -21,6 +22,7 @@
     ["appearance", "Appearance"],
     ["reading", "Reading"],
     ["accounts", "Accounts"],
+    ["signin", "Sign-in"],
     ["import", "Import"],
     ["shortcuts", "Shortcuts"],
     ["about", "About"],
@@ -110,6 +112,8 @@
         </div>
       {:else if section === "accounts"}
         <AccountsSettings {accounts} onchanged={onaccountschanged} />
+      {:else if section === "signin"}
+        <SignInSettings />
       {:else if section === "import"}
         <h2>Import</h2>
         <div class="field">

@@ -48,12 +48,10 @@ pub async fn add_account(
     app: AppHandle,
     state: State<'_, AppState>,
     config: AccountConfig,
-    password: String,
+    password: Option<String>,
     sender_name: Option<String>,
 ) -> Res<i64> {
-    imap::test_login(&config, &password).await.map_err(|e| format!("Incoming mail (IMAP): {}", full(e)))?;
-    smtp::test_login(&config, &password).await.map_err(|e| format!("Outgoing mail (SMTP): {}", full(e)))?;
-    secrets::save_password(&config.email, &password).map_err(full)?;
+    verify(&config, password).await?;
     let json = serde_json::to_string(&config).map_err(err)?;
     let id = {
         let store = state.0.lock().map_err(err)?;
@@ -111,11 +109,9 @@ pub async fn connect_archive(
     state: State<'_, AppState>,
     account_id: i64,
     config: AccountConfig,
-    password: String,
+    password: Option<String>,
 ) -> Res<()> {
-    imap::test_login(&config, &password).await.map_err(|e| format!("Incoming mail (IMAP): {}", full(e)))?;
-    smtp::test_login(&config, &password).await.map_err(|e| format!("Outgoing mail (SMTP): {}", full(e)))?;
-    secrets::save_password(&config.email, &password).map_err(full)?;
+    verify(&config, password).await?;
     let json = serde_json::to_string(&config).map_err(err)?;
     state.0.lock().map_err(err)?.connect_archive(account_id, &json, &cache_root()).map_err(err)?;
     tauri::async_runtime::spawn(async move { sync_accounts(app, Some(account_id)).await });
@@ -139,13 +135,7 @@ pub async fn update_server_settings(
     config: AccountConfig,
     password: Option<String>,
 ) -> Res<()> {
-    let password = match password.filter(|p| !p.is_empty()) {
-        Some(p) => p,
-        None => secrets::password(&config.email).map_err(full)?,
-    };
-    imap::test_login(&config, &password).await.map_err(|e| format!("Incoming mail (IMAP): {}", full(e)))?;
-    smtp::test_login(&config, &password).await.map_err(|e| format!("Outgoing mail (SMTP): {}", full(e)))?;
-    secrets::save_password(&config.email, &password).map_err(full)?;
+    verify(&config, password).await?;
     let json = serde_json::to_string(&config).map_err(err)?;
     state.0.lock().map_err(err)?.set_live_config(account_id, &json).map_err(err)?;
     tauri::async_runtime::spawn(async move { sync_accounts(app, Some(account_id)).await });
@@ -170,7 +160,7 @@ pub async fn sync_accounts(app: AppHandle, only: Option<i64>) {
         }
         let result = async {
             let config = config_of(&account.config)?;
-            let password = secrets::password(&config.email).map_err(full)?;
+            let password = oxymail_sync::credential(&config).await.map_err(full)?;
             let status = app.clone();
             let id = account.id;
             imap::sync_account(&mut store, account.id, &config, &password, move |text| {
@@ -205,7 +195,7 @@ pub async fn send_message(app: AppHandle, state: State<'_, AppState>, account_id
             .and_then(|a| a.sender_name);
         (config_of(&live.config)?, sender)
     };
-    let password = secrets::password(&config.email).map_err(full)?;
+    let password = oxymail_sync::credential(&config).await.map_err(full)?;
     let raw = smtp::build(sender_name.as_deref(), &config.email, &mail).map_err(full)?;
     smtp::send(&config, &password, &mail, &raw).await.map_err(full)?;
 
@@ -243,7 +233,7 @@ pub fn push_flags(app: &AppHandle, store: &Store, ids: &[i64], flag: char, on: b
         for ((account, folder), uids) in groups {
             let result = async {
                 let config = config_of(configs.get(&account).ok_or("account missing")?)?;
-                let password = secrets::password(&config.email).map_err(full)?;
+                let password = oxymail_sync::credential(&config).await.map_err(full)?;
                 imap::store_flag(&config, &password, &folder, &uids, flag, on).await.map_err(full)
             }
             .await;
@@ -268,5 +258,80 @@ pub fn refuse_live(store: &Store, ids: &[i64]) -> Res<()> {
 pub fn forget_password(store: &Store, account_id: i64) {
     if let Ok(Some(live)) = store.live_account(account_id) {
         let _ = secrets::forget_password(&live.email);
+        oxymail_sync::oauth::forget(&live.email);
+    }
+}
+
+/// Checks both servers accept the account's credentials. With OAuth the stored sign-in is
+/// used; otherwise the given password (or the saved one when blank), which is then saved.
+async fn verify(config: &AccountConfig, password: Option<String>) -> Res<()> {
+    let secret = if config.auth.is_some() {
+        oxymail_sync::credential(config).await.map_err(full)?
+    } else {
+        match password.filter(|p| !p.is_empty()) {
+            Some(p) => p,
+            None => secrets::password(&config.email).map_err(full)?,
+        }
+    };
+    imap::test_login(config, &secret).await.map_err(|e| format!("Incoming mail (IMAP): {}", full(e)))?;
+    smtp::test_login(config, &secret).await.map_err(|e| format!("Outgoing mail (SMTP): {}", full(e)))?;
+    if config.auth.is_none() {
+        secrets::save_password(&config.email, &secret).map_err(full)?;
+    }
+    Ok(())
+}
+
+/// Opens the browser to sign in to Google or Microsoft for `email`.
+#[tauri::command]
+pub async fn oauth_sign_in(provider: String, email: String) -> Res<()> {
+    oxymail_sync::oauth::sign_in(&provider, &email).await.map(|_| ()).map_err(full)
+}
+
+#[derive(serde::Serialize)]
+pub struct OAuthClientInfo {
+    client_id: String,
+    has_secret: bool,
+}
+
+const PROVIDERS: [&str; 2] = ["google", "microsoft"];
+
+/// The sign-in clients set in Settings, without their secrets.
+#[tauri::command]
+pub fn oauth_clients(state: State<'_, AppState>) -> Res<BTreeMap<String, OAuthClientInfo>> {
+    let settings = state.0.lock().map_err(err)?.settings().map_err(err)?;
+    Ok(PROVIDERS
+        .iter()
+        .map(|p| {
+            let client_id = settings.get(&format!("oauth_{p}_client_id")).cloned().unwrap_or_default();
+            (p.to_string(), OAuthClientInfo { client_id, has_secret: secrets::client_secret(p).is_some() })
+        })
+        .collect())
+}
+
+/// Saves a provider's client ID (settings) and secret (keyring; `None` keeps the current one).
+#[tauri::command]
+pub fn set_oauth_client(state: State<'_, AppState>, provider: String, client_id: String, client_secret: Option<String>) -> Res<()> {
+    if !PROVIDERS.contains(&provider.as_str()) {
+        return Err(format!("unknown provider {provider}"));
+    }
+    if let Some(secret) = client_secret {
+        secrets::save_client_secret(&provider, secret.trim()).map_err(full)?;
+    }
+    let store = state.0.lock().map_err(err)?;
+    store.set_setting(&format!("oauth_{provider}_client_id"), client_id.trim()).map_err(err)?;
+    load_oauth_client(&store, &provider);
+    Ok(())
+}
+
+/// Hands a provider's client from settings and keyring to the sync crate.
+pub fn load_oauth_client(store: &Store, provider: &str) {
+    let id = store.settings().ok().and_then(|s| s.get(&format!("oauth_{provider}_client_id")).cloned()).unwrap_or_default();
+    let client = (!id.is_empty()).then(|| oxymail_sync::oauth::Client { id, secret: secrets::client_secret(provider) });
+    oxymail_sync::oauth::set_client(provider, client);
+}
+
+pub fn load_oauth_clients(store: &Store) {
+    for p in PROVIDERS {
+        load_oauth_client(store, p);
     }
 }

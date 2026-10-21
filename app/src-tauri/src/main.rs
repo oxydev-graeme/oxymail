@@ -161,6 +161,7 @@ fn import_archive(state: State<AppState>, path: String) -> Res<ImportStats> {
 fn main() {
     oxymail_sync::init();
     let store = Store::open(&Store::default_path()).expect("opening the OxyMail store");
+    live::load_oauth_clients(&store);
     tauri::Builder::default()
         .manage(AppState(Mutex::new(store)))
         .manage(live::SyncState::default())
@@ -203,7 +204,10 @@ fn main() {
             live::live_config,
             live::update_server_settings,
             live::connect_suggestion,
-            live::connect_archive
+            live::connect_archive,
+            live::oauth_sign_in,
+            live::oauth_clients,
+            live::set_oauth_client
         ])
         .run(tauri::generate_context!())
         .expect("running OxyMail");

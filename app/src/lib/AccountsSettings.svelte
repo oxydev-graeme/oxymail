@@ -5,6 +5,8 @@
   import SignatureEditor from "./SignatureEditor.svelte";
   import AddAccount from "./AddAccount.svelte";
   import ServerFields from "./ServerFields.svelte";
+  import AuthChoice from "./AuthChoice.svelte";
+  import { onMount } from "svelte";
 
   let { accounts, onchanged } = $props();
 
@@ -99,6 +101,15 @@
     }
   }
 
+  let clients = $state({});
+  let preferPassword = $state(false);
+  const clientReady = (provider) => Boolean(provider && clients[provider]?.client_id);
+  let connectOAuth = $derived(Boolean(connecting?.oauth && clientReady(connecting.oauth) && !preferPassword));
+
+  onMount(async () => {
+    clients = await api.oauthClients().catch(() => ({}));
+  });
+
   let connecting = $state(null);
   let connectPassword = $state("");
   let connectBusy = $state(false);
@@ -122,7 +133,14 @@
     try {
       connecting.imap.port = Number(connecting.imap.port);
       connecting.smtp.port = Number(connecting.smtp.port);
-      await api.connectArchive(editing.id, connecting, connectPassword);
+      if (connectOAuth) {
+        await api.oauthSignIn(connecting.oauth, connecting.email);
+        connecting.auth = connecting.oauth;
+        await api.connectArchive(editing.id, connecting, null);
+      } else {
+        connecting.auth = null;
+        await api.connectArchive(editing.id, connecting, connectPassword);
+      }
       const id = editing.id;
       connecting = null;
       connectPassword = "";
@@ -134,6 +152,22 @@
       connectError = String(e);
     } finally {
       connectBusy = false;
+    }
+  }
+
+  async function signInAgain() {
+    serverBusy = true;
+    serverMessage = "";
+    try {
+      await api.oauthSignIn(server.auth, server.email);
+      await api.updateServerSettings(editing.id, server, null);
+      serverOk = true;
+      serverMessage = "Signed in again. Settings saved.";
+    } catch (e) {
+      serverOk = false;
+      serverMessage = String(e);
+    } finally {
+      serverBusy = false;
     }
   }
 
@@ -232,20 +266,13 @@
         </div>
       {:else}
         <div class="found">Filled in from {connecting.source}. Check them, then add the password.</div>
-        {#if connecting.oauth}
-          <div class="note">
-            Google accounts need an <b>app password</b> for now (myaccount.google.com/apppasswords, with 2-step
-            verification on).
-          </div>
-        {/if}
         <ServerFields bind:config={connecting} />
-        <label class="password">
-          <span class="label">{connecting.oauth ? "App password" : "Password"}</span>
-          <input type="password" bind:value={connectPassword} />
-        </label>
+        <div class="auth">
+          <AuthChoice provider={connecting.oauth} clientReady={clientReady(connecting.oauth)} bind:password={connectPassword} bind:preferPassword />
+        </div>
         <div class="server-actions">
-          <button class="primary" onclick={connect} disabled={connectBusy || !connectPassword}>
-            {connectBusy ? "Checking sign-in…" : "Connect"}
+          <button class="primary" onclick={connect} disabled={connectBusy || (!connectOAuth && !connectPassword)}>
+            {connectBusy ? (connectOAuth ? "Waiting for the browser…" : "Checking sign-in…") : connectOAuth ? "Sign in and connect" : "Connect"}
           </button>
           <button class="ghost" onclick={() => (connecting = null)}>Cancel</button>
         </div>
@@ -257,10 +284,17 @@
       <h3>Server settings</h3>
       {#if server}
         <ServerFields bind:config={server} />
-        <label class="password">
-          <span class="label">Password</span>
-          <input type="password" bind:value={newPassword} placeholder="Unchanged — saved in your keyring" />
-        </label>
+        {#if server.auth}
+          <div class="signed-in">
+            Signed in with {server.auth === "google" ? "Google" : "Microsoft"}.
+            <button class="link" onclick={signInAgain} disabled={serverBusy}>Sign in again</button>
+          </div>
+        {:else}
+          <label class="password">
+            <span class="label">Password</span>
+            <input type="password" bind:value={newPassword} placeholder="Unchanged — saved in your keyring" />
+          </label>
+        {/if}
         <div class="server-actions">
           <button class="ghost" onclick={saveServer} disabled={serverBusy}>
             {serverBusy ? "Testing sign-in…" : "Test and save server settings"}
@@ -359,8 +393,9 @@
   .ghost { padding: 7px 14px; border-radius: 8px; border: 1px solid var(--border); font-size: 13px; }
   .ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
   .ok { color: var(--accent); font-size: 13px; }
+  .auth { margin-top: 14px; }
+  .signed-in { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 10px 12px; border-radius: 8px; background: var(--accent-soft); font-size: 13px; }
   .found { margin-bottom: 12px; padding: 10px 12px; border-radius: 8px; background: var(--accent-soft); font-size: 13px; }
-  .note { margin-bottom: 12px; padding: 10px 12px; border-radius: 8px; background: var(--warn-bg); color: var(--warn-text); font-size: 13px; line-height: 1.5; }
   .bad { color: var(--danger); font-size: 13px; user-select: text; }
   .tag { border: 1px solid var(--border); color: var(--muted); }
   .order { display: flex; gap: 1px; }
