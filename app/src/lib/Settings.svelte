@@ -127,7 +127,6 @@
           <div class="label">Index location</div>
           <code>{dataPath}</code>
         </div>
-        <p class="hint">Live IMAP, Gmail and Outlook accounts arrive in the next stage.</p>
       {:else if section === "shortcuts"}
         <h2>Keyboard shortcuts</h2>
         <table>

@@ -3,6 +3,7 @@
   import Avatar from "./Avatar.svelte";
   import Icon from "./Icon.svelte";
   import SignatureEditor from "./SignatureEditor.svelte";
+  import AddAccount from "./AddAccount.svelte";
 
   let { accounts, onchanged } = $props();
 
@@ -15,6 +16,7 @@
   let dragIndex = $state(null);
   let overIndex = $state(null);
   let message = $state("");
+  let adding = $state(false);
 
   $effect(() => {
     order = [...accounts];
@@ -87,8 +89,10 @@
   async function remove() {
     const ok = confirm(
       `Remove ${editing.name} from OxyMail?\n\n` +
-        "Its folders and messages disappear from the app and from search. Nothing is deleted: " +
-        "importing the same archive again brings it back with your stars and folders.",
+        (editing.kind === "imap"
+          ? "OxyMail stops syncing it and forgets its saved password. Mail on the server is not touched."
+          : "Its folders and messages disappear from the app and from search. Nothing is deleted: " +
+            "importing the same archive again brings it back with your stars and folders."),
     );
     if (!ok) return;
     await api.removeAccount(editing.id);
@@ -97,7 +101,9 @@
   }
 </script>
 
-{#if editing}
+{#if adding}
+  <AddAccount oncancel={() => (adding = false)} onadded={() => { adding = false; onchanged(); }} />
+{:else if editing}
   <button class="back" onclick={() => (editing = null)}>‹ All accounts</button>
   <h2>{editing.name}</h2>
 
@@ -149,7 +155,10 @@
     <button class="danger" onclick={remove}><Icon name="trash" size={15} /> Remove account</button>
   </div>
 {:else}
-  <h2>Accounts</h2>
+  <div class="head">
+    <h2>Accounts</h2>
+    <button class="primary" onclick={() => (adding = true)}>Add account</button>
+  </div>
   <p class="hint top">Drag to reorder. The sidebar follows this order.</p>
   <ul class="accounts">
     {#each order as account, i (account.id)}
@@ -169,7 +178,7 @@
           {#if account.label}<span class="ellipsis muted small">{account.name}</span>{/if}
         </span>
         {#if account.signature}<span class="tag" title="Has a signature">Signature</span>{/if}
-        <span class="badge">{account.kind === "archive" ? "Archive" : account.kind}</span>
+        <span class="badge" class:live={account.kind === "imap"}>{account.kind === "archive" ? "Archive" : "Live"}</span>
         <span class="order">
           <button onclick={() => move(i, -1)} disabled={i === 0} title="Move up">▲</button>
           <button onclick={() => move(i, 1)} disabled={i === order.length - 1} title="Move down">▼</button>
@@ -212,6 +221,8 @@
   .small { font-size: 11px; }
   .badge, .tag { font-size: 11px; padding: 1px 8px; border-radius: 99px; flex-shrink: 0; }
   .badge { background: var(--accent-soft); color: var(--accent); }
+  .badge.live { background: color-mix(in srgb, var(--amber) 18%, transparent); color: var(--warn-text); }
+  .head { display: flex; align-items: center; justify-content: space-between; }
   .tag { border: 1px solid var(--border); color: var(--muted); }
   .order { display: flex; gap: 1px; }
   .order button { width: 22px; height: 22px; border-radius: 4px; font-size: 9px; color: var(--muted); }

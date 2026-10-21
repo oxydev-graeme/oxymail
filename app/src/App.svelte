@@ -1,11 +1,12 @@
 <script>
   import { onMount } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { api, accountLabel, DEFAULT_SETTINGS, shortDate, longDate, formatSize, messageDocument } from "./lib/api.js";
+  import { api, listen, isLive, quotableHtml, escapeHtml, accountLabel, DEFAULT_SETTINGS, shortDate, longDate, formatSize, messageDocument } from "./lib/api.js";
   import Logo from "./lib/Logo.svelte";
   import Icon from "./lib/Icon.svelte";
   import Settings from "./lib/Settings.svelte";
   import Avatar from "./lib/Avatar.svelte";
+  import Compose from "./lib/Compose.svelte";
 
   const PAGE = 200;
   const appWindow = getCurrentWindow();
@@ -19,6 +20,15 @@
   let folder = $state(null);
 
   let account = $derived(accounts.find((a) => a.id === accountId) ?? null);
+  let liveAccounts = $derived(accounts.filter(isLive));
+
+  let composing = $state(null);
+  /** account id → what sync is doing right now */
+  let syncing = $state({});
+  /** account id → last sync error */
+  let syncErrors = $state({});
+  let lastSync = $state(null);
+  let syncText = $derived(Object.values(syncing)[0] ?? null);
 
   let list = $state([]);
   let listDone = $state(false);
@@ -39,6 +49,7 @@
   let selected = $derived(list.find((m) => m.id === selectedId) ?? null);
   /** Role of the folder the selected message is in (search results can span folders). */
   let selectedRole = $derived(selected?.folder_role ?? null);
+  let selectedLive = $derived(isLive(accounts.find((a) => a.id === selected?.account_id)));
 
   $effect(() => {
     const root = document.documentElement;
@@ -53,7 +64,96 @@
       error = String(e);
     }
     await loadAccounts();
+
+    listen("sync-status", ({ payload }) => {
+      syncing[payload.account_id] = payload.text;
+    });
+    listen("sync-done", async ({ payload }) => {
+      delete syncing[payload.account_id];
+      lastSync = new Date();
+      if (payload.error) {
+        syncErrors[payload.account_id] = payload.error;
+        return;
+      }
+      delete syncErrors[payload.account_id];
+      accounts = await api.accounts();
+      if (payload.account_id === accountId) {
+        folders = await api.folders(accountId);
+        if (!folder) {
+          const inbox = folders.find((f) => f.role === "inbox") ?? folders[0];
+          if (inbox) openFolder(inbox);
+        } else if (!searching && payload.report?.new_messages + payload.report?.removed > 0) {
+          refreshList();
+        }
+      }
+    });
+    listen("sync-error", ({ payload }) => {
+      error = payload.error;
+    });
   });
+
+  /** Reloads the visible page of the folder without losing the selection. */
+  async function refreshList() {
+    if (!folder) return;
+    const page = await api.messages(folder.id, 0, Math.max(list.length, PAGE));
+    list = page;
+    listDone = page.length < PAGE;
+  }
+
+  function syncNow() {
+    api.syncNow().catch((e) => (error = String(e)));
+  }
+
+  // ---- Compose -------------------------------------------------------------
+
+  const ownAddresses = () => new Set(liveAccounts.map((a) => a.name.toLowerCase()));
+  const emailOf = (s) => (s.match(/<([^>]+)>/)?.[1] ?? s).trim();
+  const prefixed = (prefix, subject = "") =>
+    new RegExp(`^${prefix}:`, "i").test(subject.trim()) ? subject : `${prefix}: ${subject}`;
+  /** The live account to send from: the message's own account if it is live, else the first. */
+  const sendingAccount = (m) => (isLive(accounts.find((a) => a.id === m?.account_id)) ? m.account_id : liveAccounts[0]?.id);
+
+  function originalHtml(v) {
+    return v.html ? quotableHtml(v.html) : `<pre style="white-space:pre-wrap;font:inherit">${escapeHtml(v.text ?? "")}</pre>`;
+  }
+
+  function compose() {
+    composing = { account_id: account && isLive(account) ? account.id : liveAccounts[0]?.id };
+  }
+
+  function reply(all = false) {
+    if (!view) return;
+    const own = ownAddresses();
+    const primary = (view.reply_to.length ? view.reply_to : view.from).map(emailOf);
+    const others = all ? [...view.to, ...view.cc].map(emailOf).filter((e) => !own.has(e.toLowerCase()) && !primary.includes(e)) : [];
+    composing = {
+      account_id: sendingAccount(selected),
+      to: primary.join(", "),
+      cc: others.join(", "),
+      subject: prefixed("Re", view.subject ?? ""),
+      in_reply_to: view.message_id,
+      references: [...view.references, view.message_id].filter(Boolean),
+      quote: `<div>On ${escapeHtml(longDate(view.date))}, ${escapeHtml(view.from.join(", "))} wrote:</div><blockquote>${originalHtml(view)}</blockquote>`,
+    };
+  }
+
+  function forward() {
+    if (!view) return;
+    const head = [
+      ["From", view.from.join(", ")],
+      ["Date", longDate(view.date)],
+      ["Subject", view.subject ?? ""],
+      ["To", view.to.join(", ")],
+    ]
+      .map(([k, v]) => `<b>${k}:</b> ${escapeHtml(v)}`)
+      .join("<br>");
+    composing = {
+      account_id: sendingAccount(selected),
+      subject: prefixed("Fwd", view.subject ?? ""),
+      quote: `<div>---------- Forwarded message ----------<br>${head}</div><br>${originalHtml(view)}`,
+      note: view.attachments.length ? "The original attachments aren't forwarded yet; save and re-attach them." : "",
+    };
+  }
 
   async function loadAccounts() {
     try {
@@ -261,7 +361,7 @@
   }
 
   function onKey(event) {
-    if (showSettings) return;
+    if (showSettings || composing) return;
     if (event.target instanceof HTMLInputElement) {
       if (event.key === "Escape") {
         event.target.blur();
@@ -276,12 +376,16 @@
       j: () => keys.ArrowDown(),
       ArrowUp: () => list[Math.max(i - 1, 0)] && select(list[Math.max(i - 1, 0)].id),
       k: () => keys.ArrowUp(),
-      e: () => (selectedRole === "archive" ? moveToInbox() : archive()),
-      Delete: () => remove(),
-      "#": () => remove(),
+      e: () => !selectedLive && (selectedRole === "archive" ? moveToInbox() : archive()),
+      Delete: () => !selectedLive && remove(),
+      "#": () => !selectedLive && remove(),
       s: () => toggleStar(),
       u: () => toggleRead(),
       "/": () => searchInput?.focus(),
+      c: () => compose(),
+      r: () => reply(false),
+      a: () => reply(true),
+      f: () => forward(),
       Escape: () => searching && clearSearch(),
     };
     const fn = keys[event.key];
@@ -333,6 +437,12 @@
     </form>
     <div class="spacer" data-tauri-drag-region></div>
     <div class="win">
+      <button class="compose-btn" onclick={compose} title="New message (c)"><Icon name="pen" size={15} /><span>New</span></button>
+      {#if liveAccounts.length}
+        <button onclick={syncNow} class:spinning={syncText} title={syncText ? `Syncing ${syncText}` : "Check for new mail"}>
+          <Icon name="refresh" size={16} />
+        </button>
+      {/if}
       <button onclick={() => (showSettings = true)} title="Settings"><Icon name="settings" size={17} /></button>
       <span class="divider"></span>
       <button onclick={() => appWindow.minimize()} title="Minimise"><Icon name="minimize" size={15} /></button>
@@ -350,6 +460,7 @@
             <button class="account-main" onclick={() => selectAccount(a.id)} title={a.name}>
               <Avatar account={a} size={24} />
               <span class="ellipsis">{accountLabel(a)}</span>
+              {#if syncErrors[a.id]}<span class="sync-error" title={syncErrors[a.id]}>!</span>{/if}
               {#if a.unread > 0}<span class="count">{a.unread.toLocaleString()}</span>{/if}
             </button>
             {#if a.unread > 0}
@@ -373,6 +484,17 @@
             </button>
           {/each}
         </nav>
+      {/if}
+      {#if liveAccounts.length}
+        <div class="status" title={syncText ?? ""}>
+          {#if syncText}
+            <span class="pulse"></span><span class="ellipsis">Syncing {syncText}</span>
+          {:else if account && syncErrors[account.id]}
+            <span class="ellipsis bad">{syncErrors[account.id]}</span>
+          {:else if lastSync}
+            <span class="ellipsis">Up to date · {lastSync.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>
+          {/if}
+        </div>
       {/if}
     </aside>
 
@@ -407,12 +529,14 @@
               <button class:starred={m.starred} onclick={() => toggleStar(m)} title={m.starred ? "Unstar" : "Star"}>
                 <Icon name="star" size={15} />
               </button>
-              {#if m.folder_role !== "archive" && m.folder_role !== "trash"}
-                <button onclick={() => archive(m)} title="Archive"><Icon name="archive" size={15} /></button>
+              {#if !isLive(accounts.find((a) => a.id === m.account_id))}
+                {#if m.folder_role !== "archive" && m.folder_role !== "trash"}
+                  <button onclick={() => archive(m)} title="Archive"><Icon name="archive" size={15} /></button>
+                {/if}
+                <button onclick={() => remove(m)} title={m.folder_role === "trash" ? "Remove from OxyMail" : "Delete"}>
+                  <Icon name="trash" size={15} />
+                </button>
               {/if}
-              <button onclick={() => remove(m)} title={m.folder_role === "trash" ? "Remove from OxyMail" : "Delete"}>
-                <Icon name="trash" size={15} />
-              </button>
             </div>
             {#if m.starred}<span class="star-pin"><Icon name="star" size={12} /></span>{/if}
           </div>
@@ -438,7 +562,13 @@
         </div>
       {:else if view && selected}
         <div class="toolbar">
-          {#if selectedRole === "trash"}
+          <button onclick={() => reply(false)} title="Reply (r)"><Icon name="reply" size={16} /><span>Reply</span></button>
+          <button onclick={() => reply(true)} title="Reply all (a)"><Icon name="replyAll" size={16} /><span>Reply all</span></button>
+          <button onclick={forward} title="Forward (f)"><Icon name="forward" size={16} /><span>Forward</span></button>
+          <span class="sep"></span>
+          {#if selectedLive}
+            <!-- Moving and deleting live mail arrives with two-way sync. -->
+          {:else if selectedRole === "trash"}
             <button onclick={() => restore()}><Icon name="restore" size={16} /><span>Restore</span></button>
             <button class="danger" onclick={() => remove()}><Icon name="trash" size={16} /><span>Remove from OxyMail</span></button>
           {:else}
@@ -504,6 +634,15 @@
   />
 {/if}
 
+{#if composing}
+  <Compose
+    draft={composing}
+    accounts={liveAccounts}
+    onclose={() => (composing = null)}
+    onsent={(note) => { composing = null; flash(note); }}
+  />
+{/if}
+
 {#if toast}
   <div class="toast">
     <span>{toast.message}</span>
@@ -552,6 +691,15 @@
   .win button { display: grid; place-items: center; width: 32px; height: 30px; border-radius: 6px; color: var(--muted); }
   .win button:hover { background: var(--hover); color: var(--text); }
   .win .close:hover { background: var(--danger); color: #fff; }
+  .compose-btn { width: auto !important; gap: 6px; padding: 0 12px; margin-right: 6px; display: flex !important; background: var(--accent); color: #fff !important; font-weight: 600; font-size: 13px; }
+  .compose-btn:hover { background: var(--brand) !important; }
+  .spinning :global(svg) { animation: spin 1s linear infinite; color: var(--accent); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .status { position: sticky; bottom: -12px; display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 8px 16px; font-size: 12px; color: var(--muted); background: var(--sidebar); border-top: 1px solid var(--border); }
+  .status .bad { color: var(--danger); }
+  .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+  .sync-error { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--danger); color: #fff; font-size: 11px; font-weight: 800; flex-shrink: 0; }
   .divider { width: 1px; height: 18px; margin: 0 6px; background: var(--border); }
 
   .shell { display: grid; grid-template-columns: 250px 380px 1fr; min-height: 0; }

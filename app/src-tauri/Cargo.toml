@@ -11,6 +11,9 @@ oxymail-core = { path = "../../crates/core" }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
+oxymail-sync = { version = "0.1.0", path = "../../crates/sync" }
+serde_json = "1.0.154"
+tokio = { version = "1.54.0", features = ["time"] }
 
 # The binary name is the Wayland app id, which must match oxymail.desktop for the icon to show.
 [[bin]]

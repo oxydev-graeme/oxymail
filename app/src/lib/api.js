@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+export { listen } from "@tauri-apps/api/event";
 
 export const api = {
   accounts: () => invoke("accounts"),
@@ -21,6 +22,10 @@ export const api = {
   removeAccount: (id) => invoke("remove_account", { id }),
   markFolderRead: (folderId) => invoke("mark_folder_read", { folderId }),
   markAccountRead: (accountId) => invoke("mark_account_read", { accountId }),
+  discoverAccount: (email) => invoke("discover_account", { email }),
+  addAccount: (config, password, senderName) => invoke("add_account", { config, password, senderName }),
+  syncNow: (accountId = null) => invoke("sync_now", { accountId }),
+  sendMessage: (accountId, mail) => invoke("send_message", { accountId, mail }),
 };
 
 /** Sidebar name for an account: its label, else its address. */
@@ -99,3 +104,25 @@ export function messageDocument(html) {
   pre { white-space: pre-wrap; }
 </style></head><body>${html}</body></html>`;
 }
+
+export const isLive = (account) => account?.kind === "imap";
+
+/** Reads a File as base64 without the data: prefix. */
+export function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] ?? "");
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Message HTML made safe to quote inside the app: no head, styles, scripts or embeds. */
+export function quotableHtml(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("style, script, link, meta, title, iframe, object, embed, form").forEach((n) => n.remove());
+  return doc.body.innerHTML;
+}
+
+export const escapeHtml = (text) =>
+  text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);

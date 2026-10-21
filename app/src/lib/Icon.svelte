@@ -24,6 +24,12 @@
     spam: "M12 3l9 16H3zM12 10v4M12 17h.01",
     check: "M4 12l5 5L20 6",
     checks: "M2 12l5 5L18 6M12 16l1 1L22 8",
+    pen: "M4 20h4L19 9l-4-4L4 16zM14 6l4 4",
+    refresh: "M20 11a8 8 0 0 0-14.6-4.6L4 8M4 4v4h4M4 13a8 8 0 0 0 14.6 4.6L20 16M20 20v-4h-4",
+    reply: "M10 8L4 13l6 5M4 13h10a6 6 0 0 1 6 6",
+    replyAll: "M13 8l-5 5 5 5M8 8l-5 5 5 5M8 13h7a6 6 0 0 1 6 6",
+    forward: "M14 8l6 5-6 5M20 13H10a6 6 0 0 0-6 6",
+    plus: "M12 5v14M5 12h14",
   };
 </script>
 

@@ -6,14 +6,16 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use oxymail_core::{Account, AccountUpdate, Folder, ImportStats, MessageSummary, MessageView, Store};
-use tauri::State;
+use tauri::{AppHandle, State};
 
-struct AppState(Mutex<Store>);
+mod live;
+
+pub(crate) struct AppState(Mutex<Store>);
 
 /// Commands return errors as strings so the UI can show them.
-type Res<T> = Result<T, String>;
+pub(crate) type Res<T> = Result<T, String>;
 
-fn err(e: impl std::fmt::Display) -> String {
+pub(crate) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
@@ -60,8 +62,11 @@ fn save_attachment(state: State<AppState>, id: i64, index: usize) -> Res<String>
 }
 
 #[tauri::command]
-fn set_flag(state: State<AppState>, ids: Vec<i64>, flag: char, on: bool) -> Res<()> {
-    state.0.lock().map_err(err)?.set_flag(&ids, flag, on).map_err(err)
+fn set_flag(app: AppHandle, state: State<AppState>, ids: Vec<i64>, flag: char, on: bool) -> Res<()> {
+    let mut store = state.0.lock().map_err(err)?;
+    store.set_flag(&ids, flag, on).map_err(err)?;
+    live::push_flags(&app, &store, &ids, flag, on);
+    Ok(())
 }
 
 /// Moves messages to the account's Inbox or Archive.
@@ -70,22 +75,30 @@ fn move_to(state: State<AppState>, ids: Vec<i64>, role: String) -> Res<()> {
     if role != "inbox" && role != "archive" {
         return Err(format!("cannot move to {role}"));
     }
-    state.0.lock().map_err(err)?.move_to_role(&ids, &role).map_err(err)
+    let mut store = state.0.lock().map_err(err)?;
+    live::refuse_live(&store, &ids)?;
+    store.move_to_role(&ids, &role).map_err(err)
 }
 
 #[tauri::command]
 fn move_to_folder(state: State<AppState>, ids: Vec<i64>, folder_id: i64) -> Res<()> {
-    state.0.lock().map_err(err)?.move_to_folder(&ids, folder_id).map_err(err)
+    let mut store = state.0.lock().map_err(err)?;
+    live::refuse_live(&store, &ids)?;
+    store.move_to_folder(&ids, folder_id).map_err(err)
 }
 
 #[tauri::command]
 fn delete(state: State<AppState>, ids: Vec<i64>) -> Res<()> {
-    state.0.lock().map_err(err)?.delete(&ids).map_err(err)
+    let mut store = state.0.lock().map_err(err)?;
+    live::refuse_live(&store, &ids)?;
+    store.delete(&ids).map_err(err)
 }
 
 #[tauri::command]
 fn restore(state: State<AppState>, ids: Vec<i64>) -> Res<()> {
-    state.0.lock().map_err(err)?.restore(&ids).map_err(err)
+    let mut store = state.0.lock().map_err(err)?;
+    live::refuse_live(&store, &ids)?;
+    store.restore(&ids).map_err(err)
 }
 
 #[tauri::command]
@@ -110,17 +123,25 @@ fn update_account(state: State<AppState>, id: i64, update: AccountUpdate) -> Res
 
 #[tauri::command]
 fn remove_account(state: State<AppState>, id: i64) -> Res<()> {
-    state.0.lock().map_err(err)?.remove_account(id).map_err(err)
+    let store = state.0.lock().map_err(err)?;
+    live::forget_password(&store, id);
+    store.remove_account(id).map_err(err)
 }
 
 #[tauri::command]
-fn mark_folder_read(state: State<AppState>, folder_id: i64) -> Res<Vec<i64>> {
-    state.0.lock().map_err(err)?.mark_folder_read(folder_id).map_err(err)
+fn mark_folder_read(app: AppHandle, state: State<AppState>, folder_id: i64) -> Res<Vec<i64>> {
+    let mut store = state.0.lock().map_err(err)?;
+    let ids = store.mark_folder_read(folder_id).map_err(err)?;
+    live::push_flags(&app, &store, &ids, 'S', true);
+    Ok(ids)
 }
 
 #[tauri::command]
-fn mark_account_read(state: State<AppState>, account_id: i64) -> Res<Vec<i64>> {
-    state.0.lock().map_err(err)?.mark_account_read(account_id).map_err(err)
+fn mark_account_read(app: AppHandle, state: State<AppState>, account_id: i64) -> Res<Vec<i64>> {
+    let mut store = state.0.lock().map_err(err)?;
+    let ids = store.mark_account_read(account_id).map_err(err)?;
+    live::push_flags(&app, &store, &ids, 'S', true);
+    Ok(ids)
 }
 
 #[tauri::command]
@@ -138,9 +159,22 @@ fn import_archive(state: State<AppState>, path: String) -> Res<ImportStats> {
 }
 
 fn main() {
+    oxymail_sync::init();
     let store = Store::open(&Store::default_path()).expect("opening the OxyMail store");
     tauri::Builder::default()
         .manage(AppState(Mutex::new(store)))
+        .manage(live::SyncState::default())
+        .setup(|app| {
+            // Check every live account at start-up and then every few minutes.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    live::sync_accounts(handle.clone(), None).await;
+                    tokio::time::sleep(live::SYNC_INTERVAL).await;
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             accounts,
             folders,
@@ -161,7 +195,11 @@ fn main() {
             update_account,
             remove_account,
             mark_folder_read,
-            mark_account_read
+            mark_account_read,
+            live::discover_account,
+            live::add_account,
+            live::sync_now,
+            live::send_message
         ])
         .run(tauri::generate_context!())
         .expect("running OxyMail");

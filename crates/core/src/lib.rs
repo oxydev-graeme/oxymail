@@ -12,6 +12,9 @@ use mail_parser::{MessageParser, MimeHeaders};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
+mod live;
+pub use live::{LiveAccount, RemoteFolder};
+
 const SCHEMA: &str = "
 create table if not exists accounts (
     id integer primary key,
@@ -23,6 +26,7 @@ create table if not exists accounts (
     color text,
     signature text,
     icon text,
+    config text,
     sort_index integer not null default 0,
     removed integer not null default 0,
     unique (kind, root)
@@ -32,6 +36,10 @@ create table if not exists folders (
     account_id integer not null references accounts(id),
     name text not null,
     role text,
+    remote_name text,
+    dir text,
+    uidvalidity integer,
+    last_uid integer not null default 0,
     unique (account_id, name)
 );
 create table if not exists messages (
@@ -49,6 +57,7 @@ create table if not exists messages (
     message_id text,
     origin_folder_id integer not null references folders(id),
     deleted integer not null default 0,
+    uid integer,
     unique (origin_folder_id, file)
 );
 create index if not exists messages_folder_date on messages(folder_id, deleted, date desc);
@@ -62,7 +71,28 @@ create table if not exists settings (
 ";
 
 /// `PRAGMA user_version` for the current schema.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
+
+/// v4 added what live IMAP folders need.
+const FOLDER_COLUMNS_V4: &[(&str, &str)] = &[
+    ("remote_name", "text"),
+    ("dir", "text"),
+    ("uidvalidity", "integer"),
+    ("last_uid", "integer not null default 0"),
+];
+
+fn add_missing_columns(db: &Connection, table: &str, columns: &[(&str, &str)]) -> Result<()> {
+    let existing: Vec<String> = db
+        .prepare(&format!("select name from pragma_table_info('{table}')"))?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    for (column, decl) in columns {
+        if !existing.iter().any(|c| c == column) {
+            db.execute_batch(&format!("alter table {table} add column {column} {decl}"))?;
+        }
+    }
+    Ok(())
+}
 
 /// v3 added per-account settings. Applied to any accounts table that lacks them.
 const ACCOUNT_COLUMNS_V3: &[(&str, &str)] = &[
@@ -71,6 +101,7 @@ const ACCOUNT_COLUMNS_V3: &[(&str, &str)] = &[
     ("color", "text"),
     ("signature", "text"),
     ("icon", "text"),
+    ("config", "text"),
     ("sort_index", "integer not null default 0"),
     ("removed", "integer not null default 0"),
 ];
@@ -176,6 +207,10 @@ pub struct AttachmentInfo {
 #[derive(Debug, Serialize)]
 pub struct MessageView {
     pub id: i64,
+    pub account_id: i64,
+    pub message_id: Option<String>,
+    pub references: Vec<String>,
+    pub reply_to: Vec<String>,
     pub subject: Option<String>,
     pub from: Vec<String>,
     pub to: Vec<String>,
@@ -208,6 +243,7 @@ impl Store {
         }
         let db = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         db.pragma_update(None, "journal_mode", "wal")?;
+        db.busy_timeout(std::time::Duration::from_secs(10))?;
         migrate(&db)?;
         db.pragma_update(None, "foreign_keys", "on")?;
         Ok(Self { db })
@@ -271,46 +307,10 @@ impl Store {
                             continue;
                         }
                         let raw = fs::read(entry.path())?;
-                        let Some(msg) = parser.parse(&raw) else {
+                        if index_message(&tx, &parser, folder_id, &rel, &raw, None)?.is_none() {
                             stats.unreadable += 1;
                             continue;
-                        };
-                        let from = msg.from().and_then(|a| a.first());
-                        let to = join_addresses(msg.to());
-                        let body = msg.body_text(0).map(|b| b.into_owned()).unwrap_or_default();
-                        let subject = msg.subject().map(str::to_string);
-                        let from_name = from.and_then(|a| a.name()).map(str::to_string);
-                        let from_addr = from.and_then(|a| a.address()).map(str::to_string);
-                        tx.execute(
-                            "insert into messages (folder_id, origin_folder_id, file, date, from_name,
-                                 from_addr, to_addrs, subject, snippet, flags, attachments, message_id)
-                             values (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                            params![
-                                folder_id,
-                                rel,
-                                msg.date().map(|d| d.to_timestamp()).unwrap_or(0),
-                                from_name,
-                                from_addr,
-                                to,
-                                subject,
-                                snippet(&body),
-                                maildir_flags(&rel),
-                                msg.attachment_count() as i64,
-                                msg.message_id(),
-                            ],
-                        )?;
-                        let id = tx.last_insert_rowid();
-                        tx.execute(
-                            "insert into messages_fts (rowid, subject, sender, recipients, body)
-                             values (?1, ?2, ?3, ?4, ?5)",
-                            params![
-                                id,
-                                subject,
-                                format!("{} {}", from_name.unwrap_or_default(), from_addr.unwrap_or_default()),
-                                to,
-                                truncate(&body, INDEXED_BODY_CHARS),
-                            ],
-                        )?;
+                        }
                         stats.added += 1;
                         if stats.added % 2000 == 0 {
                             progress(stats.added);
@@ -460,7 +460,7 @@ impl Store {
 
     fn message_path(&self, id: i64) -> Result<PathBuf> {
         let (root, folder, file): (String, String, String) = self.db.query_row(
-            "select a.root, f.name, m.file from messages m
+            "select a.root, coalesce(f.dir, f.name), m.file from messages m
              join folders f on f.id = m.origin_folder_id join accounts a on a.id = f.account_id
              where m.id = ?1",
             [id],
@@ -516,8 +516,22 @@ impl Store {
             notices.push(format!("Attachment not available: {name}"));
         }
 
+        let account_id: i64 = self.db.query_row(
+            "select f.account_id from messages m join folders f on f.id = m.folder_id where m.id = ?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        let references = match msg.references() {
+            mail_parser::HeaderValue::Text(t) => vec![t.to_string()],
+            mail_parser::HeaderValue::TextList(list) => list.iter().map(|t| t.to_string()).collect(),
+            _ => Vec::new(),
+        };
         Ok(MessageView {
             id,
+            account_id,
+            message_id: msg.message_id().map(str::to_string),
+            references,
+            reply_to: address_list(msg.reply_to()),
             subject: msg.subject().map(str::to_string),
             from: address_list(msg.from()),
             to: address_list(msg.to()),
@@ -666,6 +680,56 @@ impl Store {
 }
 
 
+/// Parses `raw` and adds it to the index as `folder_id/rel`. Returns `None` if it isn't a
+/// readable message.
+pub(crate) fn index_message(
+    db: &Connection,
+    parser: &MessageParser,
+    folder_id: i64,
+    rel: &str,
+    raw: &[u8],
+    uid: Option<u32>,
+) -> Result<Option<i64>> {
+    let Some(msg) = parser.parse(raw) else { return Ok(None) };
+    let from = msg.from().and_then(|a| a.first());
+    let to = join_addresses(msg.to());
+    let body = msg.body_text(0).map(|b| b.into_owned()).unwrap_or_default();
+    let subject = msg.subject().map(str::to_string);
+    let from_name = from.and_then(|a| a.name()).map(str::to_string);
+    let from_addr = from.and_then(|a| a.address()).map(str::to_string);
+    db.execute(
+        "insert into messages (folder_id, origin_folder_id, file, date, from_name, from_addr, to_addrs,
+             subject, snippet, flags, attachments, message_id, uid)
+         values (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            folder_id,
+            rel,
+            msg.date().map(|d| d.to_timestamp()).unwrap_or(0),
+            from_name,
+            from_addr,
+            to,
+            subject,
+            snippet(&body),
+            maildir_flags(rel),
+            msg.attachment_count() as i64,
+            msg.message_id(),
+            uid,
+        ],
+    )?;
+    let id = db.last_insert_rowid();
+    db.execute(
+        "insert into messages_fts (rowid, subject, sender, recipients, body) values (?1, ?2, ?3, ?4, ?5)",
+        params![
+            id,
+            subject,
+            format!("{} {}", from_name.unwrap_or_default(), from_addr.unwrap_or_default()),
+            to,
+            truncate(&body, INDEXED_BODY_CHARS),
+        ],
+    )?;
+    Ok(Some(id))
+}
+
 fn migrate(db: &Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
     let has_messages: bool = db.query_row(
@@ -688,6 +752,9 @@ fn migrate(db: &Connection) -> Result<()> {
             db.execute_batch(&format!("alter table accounts add column {column} {decl}"))?;
         }
     }
+    add_missing_columns(db, "folders", FOLDER_COLUMNS_V4)?;
+    add_missing_columns(db, "messages", &[("uid", "integer")])?;
+    db.execute_batch("create index if not exists messages_folder_uid on messages(origin_folder_id, uid)")?;
     db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -780,6 +847,16 @@ fn apply_mailbird_metadata(db: &Connection, root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Makes a name safe as a single path component.
+pub(crate) fn sanitize_component(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c.is_control() { '_' } else { c })
+        .collect();
+    let cleaned = cleaned.trim().trim_start_matches('.').to_string();
+    if cleaned.is_empty() { "_".to_string() } else { cleaned }
 }
 
 fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>> {
