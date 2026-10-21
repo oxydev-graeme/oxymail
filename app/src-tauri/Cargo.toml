@@ -1,0 +1,13 @@
+[package]
+name = "oxymail-app"
+version = "0.1.0"
+edition = "2024"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+oxymail-core = { path = "../../crates/core" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"

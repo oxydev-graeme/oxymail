@@ -1,0 +1,58 @@
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --sidebar: #eef0f4;
+  --text: #1d2433;
+  --muted: #69708a;
+  --faint: #9aa0b4;
+  --border: #e1e4ea;
+  --accent: #2f6fed;
+  --accent-soft: #e6eeff;
+  --selected: #dfe8fd;
+  --warn-bg: #fff6e0;
+  --warn-text: #7a5600;
+  --radius: 8px;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171c;
+    --panel: #1b1e24;
+    --sidebar: #121418;
+    --text: #e4e7ee;
+    --muted: #9aa1b5;
+    --faint: #6b7287;
+    --border: #2a2e37;
+    --accent: #6c9bff;
+    --accent-soft: #23314f;
+    --selected: #24345a;
+    --warn-bg: #3a2f12;
+    --warn-text: #f1cf7a;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app { height: 100%; margin: 0; }
+
+body {
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Ubuntu, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+input {
+  font: inherit;
+  color: inherit;
+}
