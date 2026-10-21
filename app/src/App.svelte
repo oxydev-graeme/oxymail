@@ -557,11 +557,10 @@
   .shell { display: grid; grid-template-columns: 250px 380px 1fr; min-height: 0; }
 
   /* ---- Sidebar ---- */
-  .sidebar { display: flex; flex-direction: column; background: var(--sidebar); border-right: 1px solid var(--border); min-width: 0; min-height: 0; }
+  .sidebar { overflow-y: auto; background: var(--sidebar); border-right: 1px solid var(--border); min-width: 0; min-height: 0; padding-bottom: 12px; }
   .section { padding: 12px 16px 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
   .folders-head { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 12px; display: flex; }
-  .accounts { flex: 0 1 auto; max-height: 52%; overflow-y: auto; padding: 0 8px; }
-  .folders { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
+  .accounts, .folders { padding: 0 8px; }
   .account { position: relative; display: flex; align-items: center; border-radius: 7px; }
   .account:hover { background: var(--hover); }
   .account.active { background: var(--selected); }
