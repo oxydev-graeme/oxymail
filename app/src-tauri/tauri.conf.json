@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OxyMail",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "co.oxydev.oxymail",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -32,13 +32,33 @@
       "deb",
       "appimage"
     ],
-    "category": "Office",
+    "category": "Productivity",
     "shortDescription": "Email client",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.png"
-    ]
+    ],
+    "createUpdaterArtifacts": true,
+    "publisher": "Oxydev",
+    "homepage": "https://github.com/oxydev-graeme/oxymail",
+    "longDescription": "Email with room to breathe: a Linux-first email client with calendar and contacts.",
+    "license": "GPL-3.0-only",
+    "linux": {
+      "deb": {
+        "desktopTemplate": "oxymail.desktop",
+        "section": "mail"
+      }
+    }
+  },
+  "mainBinaryName": "oxymail",
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFBRkQ1RjlFQ0Q3QzQ2MzkKUldRNVJuek5ubC85R2tWS2hadDYwNDBEdG9rbkRWUEJVRndpTjVoMEIyeFluQ3laNk0zVVljS3MK",
+      "endpoints": [
+        "https://github.com/oxydev-graeme/oxymail/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

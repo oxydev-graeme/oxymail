@@ -1,0 +1,57 @@
+# Builds, signs and publishes OxyMail when a version tag (v1.2.3) is pushed. The release holds
+# the .deb, the AppImage, their signatures and latest.json, which installed copies read to update.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    # The oldest supported runner, so the binaries run on older glibc too.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Test
+        run: cargo test -p oxymail-core -p oxymail-sync -p oxymail-mailbird-export
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        with:
+          projectPath: app
+          tagName: ${{ github.ref_name }}
+          releaseName: OxyMail ${{ github.ref_name }}
+          releaseBody: |
+            Install: download the AppImage (make it executable and run it) or the .deb
+            (`sudo apt install ./OxyMail_*.deb`). Installed copies update themselves.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true

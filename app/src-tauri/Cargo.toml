@@ -1,6 +1,6 @@
 [package]
 name = "oxymail-app"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [build-dependencies]
@@ -17,6 +17,8 @@ tokio = { version = "1.54.0", features = ["time"] }
 tauri-plugin-notification = "2.7.0"
 base64 = "0.23.1"
 tauri-plugin-dialog = "2.8.3"
+tauri-plugin-updater = "2.14.0"
+tauri-plugin-process = "2.4.0"
 
 # The binary name is the Wayland app id, which must match oxymail.desktop for the icon to show.
 [[bin]]

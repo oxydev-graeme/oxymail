@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name={{name}}
+GenericName=Email
+Comment=Email with room to breathe
+Exec={{exec}} %u
+Icon={{icon}}
+Terminal=false
+Categories=Network;Email;Office;
+Keywords=mail;email;inbox;calendar;contacts;
+StartupWMClass=oxymail
+StartupNotify=true
+MimeType=x-scheme-handler/mailto;

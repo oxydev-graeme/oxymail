@@ -37,6 +37,19 @@ OxyMail is an independent project and is not affiliated with Mailbird. It contai
 
 GPL-3.0. See [LICENSE](LICENSE).
 
+## Installing
+
+Download the latest release from [Releases](https://github.com/oxydev-graeme/oxymail/releases/latest):
+
+- **AppImage:** `chmod +x OxyMail_*.AppImage` and run it. It needs no installation.
+- **Debian/Ubuntu/Zorin:** `sudo apt install ./OxyMail_*_amd64.deb`
+
+Both update themselves. OxyMail checks GitHub when it starts (Settings → About can turn this off) and installs only releases signed with the project's key.
+
+## Releasing
+
+`scripts/release.sh 0.2.1` bumps the version, tags and pushes. GitHub Actions (`.github/workflows/release.yml`) then builds the .deb and AppImage, signs them with the `TAURI_SIGNING_PRIVATE_KEY` secret and publishes them with `latest.json`, which installed copies read to update.
+
 ## Building
 
 ```sh

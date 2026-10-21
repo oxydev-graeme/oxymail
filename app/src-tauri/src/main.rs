@@ -327,6 +327,8 @@ fn main() {
         .manage(AppState(Mutex::new(store)))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(live::SyncState::default())
         .setup(|app| {
             // The main window is built here rather than in tauri.conf.json so links clicked in an

@@ -6,7 +6,8 @@
   import AccountsSettings from "./AccountsSettings.svelte";
   import SignInSettings from "./SignInSettings.svelte";
 
-  let { settings, accounts, onchange, onclose, onimported, onaccountschanged } = $props();
+  let { settings, accounts, onchange, onclose, onimported, onaccountschanged, oncheckupdates } = $props();
+  let version = $state("");
 
   let section = $state("appearance");
   let importPath = $state("~/MailbirdExport/mail");
@@ -32,6 +33,7 @@
   }
 
   onMount(async () => {
+    version = await import("@tauri-apps/api/app").then((m) => m.getVersion()).catch(() => "");
     dataPath = await api.dataLocation();
   });
 
@@ -205,7 +207,19 @@
           <Logo size={56} />
           <div class="wordmark"><b>Oxy</b>Mail</div>
           <p class="tagline">Email with room to breathe.</p>
-          <p class="hint">Version 0.1.0 · GPL-3.0</p>
+          <p class="hint">Version {version || "…"} · GPL-3.0</p>
+          <div class="update-row">
+            <button class="primary" onclick={oncheckupdates}>Check for updates</button>
+          </div>
+          <label class="toggle centered">
+            <input
+              type="checkbox"
+              checked={settings.auto_update !== "false"}
+              onchange={(e) => onchange("auto_update", String(e.currentTarget.checked))}
+            />
+            <span>Check for updates when OxyMail starts</span>
+          </label>
+          <p class="hint">Updates come from GitHub releases and are only installed if their signature matches.</p>
           <p class="hint">github.com/oxydev-graeme/oxymail</p>
         </div>
       {/if}
@@ -293,6 +307,8 @@
     background: var(--bg);
     font: 12px ui-monospace, monospace;
   }
+  .update-row { margin: 14px 0 10px; }
+  .toggle.centered { justify-content: center; margin-bottom: 6px; }
   .about { display: grid; justify-items: center; text-align: center; padding-top: 40px; }
   .wordmark { margin-top: 12px; font-size: 26px; letter-spacing: -0.03em; font-weight: 450; }
   .wordmark b { font-weight: 800; }

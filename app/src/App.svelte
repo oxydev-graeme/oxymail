@@ -12,6 +12,7 @@
   import CalendarView from "./lib/CalendarView.svelte";
   import ContactsView from "./lib/ContactsView.svelte";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+  import { findUpdate, installUpdate } from "./lib/updates.js";
 
   const PAGE = 200;
   const appWindow = getCurrentWindow();
@@ -26,6 +27,32 @@
 
   let account = $derived(accounts.find((a) => a.id === accountId) ?? null);
   let allInboxUnread = $derived(accounts.reduce((n, a) => n + a.unread, 0));
+  /** A newer signed release found on GitHub, and install progress (0–1) while updating. */
+  let update = $state(null);
+  let updating = $state(null);
+
+  async function checkUpdates(quiet = true) {
+    try {
+      update = await findUpdate();
+      if (!quiet) flash(update ? `OxyMail ${update.version} is available` : "OxyMail is up to date");
+    } catch (e) {
+      if (!quiet) error = `Couldn't check for updates: ${e}`;
+    }
+  }
+
+  async function applyUpdate() {
+    if (!update) return;
+    const notes = update.body ? `\n\n${update.body.slice(0, 600)}` : "";
+    if (!confirm(`Install OxyMail ${update.version} and restart?${notes}`)) return;
+    updating = 0;
+    try {
+      await installUpdate(update, (p) => (updating = p));
+    } catch (e) {
+      updating = null;
+      error = `The update didn't install: ${e}`;
+    }
+  }
+
   /** Which part of the app is showing: mail, calendar or contacts. */
   let mode = $state("mail");
   let calendarList = $state([]);
@@ -263,6 +290,7 @@
     await loadAccounts();
     refreshDrafts();
     refreshCalendars();
+    if (settings.auto_update !== "false") setTimeout(() => checkUpdates(true), 15000);
     refreshQueues();
     listen("scheduled-changed", refreshQueues);
 
@@ -833,6 +861,11 @@
     </form>
     <div class="spacer" data-tauri-drag-region></div>
     <div class="win">
+      {#if update}
+        <button class="update-btn" onclick={applyUpdate} disabled={updating !== null} title={`Install OxyMail ${update.version}`}>
+          {updating === null ? `Update to ${update.version}` : `Updating… ${Math.round(updating * 100)}%`}
+        </button>
+      {/if}
       <button class="compose-btn" onclick={compose} title="New message (c)"><Icon name="pen" size={15} /><span>New</span></button>
       {#if liveAccounts.length}
         <button onclick={syncNow} class:spinning={syncText} title={syncText ? `Syncing ${syncText}` : "Check for new mail"}>
@@ -1196,6 +1229,7 @@
     onchange={changeSetting}
     onclose={() => (showSettings = false)}
     onimported={loadAccounts}
+    oncheckupdates={() => checkUpdates(false)}
     onaccountschanged={loadAccounts}
   />
 {/if}
@@ -1274,6 +1308,7 @@
   .win button { display: grid; place-items: center; width: 32px; height: 30px; border-radius: 6px; color: var(--muted); }
   .win button:hover { background: var(--hover); color: var(--text); }
   .win .close:hover { background: var(--danger); color: #fff; }
+  .update-btn { width: auto !important; display: flex !important; padding: 0 12px; margin-right: 6px; border: 1px solid var(--amber) !important; color: var(--warn-text) !important; background: color-mix(in srgb, var(--amber) 14%, transparent) !important; font-size: 12px; font-weight: 600; }
   .compose-btn { width: auto !important; gap: 6px; padding: 0 12px; margin-right: 6px; display: flex !important; background: var(--accent); color: #fff !important; font-weight: 600; font-size: 13px; }
   .compose-btn:hover { background: var(--brand) !important; }
   .spinning :global(svg) { animation: spin 1s linear infinite; color: var(--accent); }
