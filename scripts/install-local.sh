@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds OxyMail in release mode and installs it for the current user:
+# Builds OxyMail from source and installs it for the current user (for development; normal
+# installs use the released AppImage or .deb, which update themselves):
 # ~/.local/bin/oxymail, a menu entry, and icons. No root needed. Run again to update.
 set -euo pipefail
 
@@ -22,6 +23,13 @@ cd "$repo/app"
 npm run build
 (cd "$repo" && CARGO_TARGET_DIR="$target" cargo build --release -p oxymail-app --features tauri/custom-protocol)
 
+# If the released AppImage is installed (it updates itself), keep it as the main copy and put
+# this development build alongside as `oxymail-dev`.
+if [ -x "$HOME/.local/bin/OxyMail.AppImage" ]; then
+  install -Dm755 "$target/release/oxymail" "$HOME/.local/bin/oxymail-dev"
+  echo "Installed the development build as oxymail-dev; the menu entry still opens the released AppImage."
+  exit 0
+fi
 install -Dm755 "$target/release/oxymail" "$HOME/.local/bin/oxymail"
 
 icons="$repo/app/src-tauri/icons"
