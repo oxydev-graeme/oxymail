@@ -1,5 +1,6 @@
 <script>
-  import { api, accountLabel } from "./api.js";
+  import { api, accountLabel, imageToIcon } from "./api.js";
+  import Avatar from "./Avatar.svelte";
   import Icon from "./Icon.svelte";
   import SignatureEditor from "./SignatureEditor.svelte";
 
@@ -54,8 +55,20 @@
       sender_name: account.sender_name ?? "",
       color: account.color ?? "",
       signature: account.signature ?? "",
+      icon: account.icon ?? "",
     };
     message = "";
+  }
+
+  async function pickIcon(event) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    try {
+      draft.icon = await imageToIcon(file);
+    } catch (e) {
+      message = String(e.message ?? e);
+    }
   }
 
   async function save() {
@@ -100,6 +113,19 @@
   </div>
 
   <div class="field">
+    <span class="label">Icon</span>
+    <div class="icon-row">
+      <Avatar account={{ ...editing, ...draft, icon: draft.icon || null, color: draft.color || null }} size={48} />
+      <label class="upload">
+        Upload image…
+        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" onchange={pickIcon} />
+      </label>
+      {#if draft.icon}<button class="link" onclick={() => (draft.icon = "")}>Use initial instead</button>{/if}
+    </div>
+    <p class="hint">Square images look best. They're cropped to a square and stored at 96 × 96.</p>
+  </div>
+
+  <div class="field">
     <span class="label">Colour</span>
     <div class="swatches">
       {#each SWATCHES as c}
@@ -137,7 +163,7 @@
         ondragend={reset}
       >
         <span class="grip" aria-hidden="true">⋮⋮</span>
-        <span class="dot" style:background={account.color || "var(--faint)"}></span>
+        <Avatar {account} size={22} />
         <span class="names">
           <span class="ellipsis">{accountLabel(account)}</span>
           {#if account.label}<span class="ellipsis muted small">{account.name}</span>{/if}
@@ -178,7 +204,10 @@
   .accounts li.dragging { opacity: 0.4; }
   .accounts li.over { box-shadow: inset 0 2px 0 var(--accent); }
   .grip { cursor: grab; color: var(--faint); letter-spacing: -3px; padding: 0 4px; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .icon-row { display: flex; align-items: center; gap: 14px; }
+  .upload { position: relative; padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; cursor: pointer; }
+  .upload:hover { border-color: var(--accent); color: var(--accent); }
+  .upload input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
   .names { display: grid; flex: 1; min-width: 0; }
   .small { font-size: 11px; }
   .badge, .tag { font-size: 11px; padding: 1px 8px; border-radius: 99px; flex-shrink: 0; }

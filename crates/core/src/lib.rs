@@ -22,6 +22,7 @@ create table if not exists accounts (
     sender_name text,
     color text,
     signature text,
+    icon text,
     sort_index integer not null default 0,
     removed integer not null default 0,
     unique (kind, root)
@@ -69,6 +70,7 @@ const ACCOUNT_COLUMNS_V3: &[(&str, &str)] = &[
     ("sender_name", "text"),
     ("color", "text"),
     ("signature", "text"),
+    ("icon", "text"),
     ("sort_index", "integer not null default 0"),
     ("removed", "integer not null default 0"),
 ];
@@ -120,6 +122,10 @@ pub struct Account {
     pub color: Option<String>,
     /// HTML signature appended to new messages.
     pub signature: Option<String>,
+    /// Small square image as a `data:` URI, shown instead of the colour dot.
+    pub icon: Option<String>,
+    /// Unread messages outside Sent, Drafts, Spam and Trash.
+    pub unread: i64,
 }
 
 /// Editable account fields. `None` clears a field.
@@ -129,6 +135,7 @@ pub struct AccountUpdate {
     pub sender_name: Option<String>,
     pub color: Option<String>,
     pub signature: Option<String>,
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -319,8 +326,11 @@ impl Store {
 
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let mut stmt = self.db.prepare(
-            "select id, name, kind, label, sender_name, color, signature from accounts
-             where removed = 0 order by sort_index, name",
+            "select a.id, a.name, a.kind, a.label, a.sender_name, a.color, a.signature, a.icon,
+                    (select count(*) from messages m join folders f on f.id = m.folder_id
+                     where f.account_id = a.id and m.deleted = 0 and instr(m.flags, 'S') = 0
+                       and coalesce(f.role, '') not in ('sent', 'drafts', 'spam', 'trash'))
+             from accounts a where a.removed = 0 order by a.sort_index, a.name",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Account {
@@ -331,6 +341,8 @@ impl Store {
                 sender_name: r.get(4)?,
                 color: r.get(5)?,
                 signature: r.get(6)?,
+                icon: r.get(7)?,
+                unread: r.get(8)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -354,8 +366,15 @@ impl Store {
     pub fn update_account(&self, id: i64, update: &AccountUpdate) -> Result<()> {
         let blank = |v: &Option<String>| v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
         self.db.execute(
-            "update accounts set label = ?1, sender_name = ?2, color = ?3, signature = ?4 where id = ?5",
-            params![blank(&update.label), blank(&update.sender_name), blank(&update.color), blank(&update.signature), id],
+            "update accounts set label = ?1, sender_name = ?2, color = ?3, signature = ?4, icon = ?5 where id = ?6",
+            params![
+                blank(&update.label),
+                blank(&update.sender_name),
+                blank(&update.color),
+                blank(&update.signature),
+                blank(&update.icon),
+                id
+            ],
         )?;
         Ok(())
     }
@@ -537,6 +556,32 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Marks every unread message in a folder as read and returns their ids (for undo).
+    pub fn mark_folder_read(&mut self, folder_id: i64) -> Result<Vec<i64>> {
+        self.mark_read_where("m.folder_id = ?1", folder_id)
+    }
+
+    /// Marks every unread message in an account as read, except Spam and Trash.
+    pub fn mark_account_read(&mut self, account_id: i64) -> Result<Vec<i64>> {
+        self.mark_read_where(
+            "f.account_id = ?1 and coalesce(f.role, '') not in ('spam', 'trash')",
+            account_id,
+        )
+    }
+
+    fn mark_read_where(&mut self, condition: &str, arg: i64) -> Result<Vec<i64>> {
+        let ids: Vec<i64> = self
+            .db
+            .prepare(&format!(
+                "select m.id from messages m join folders f on f.id = m.folder_id
+                 where {condition} and m.deleted = 0 and instr(m.flags, 'S') = 0"
+            ))?
+            .query_map([arg], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        self.set_flag(&ids, 'S', true)?;
+        Ok(ids)
     }
 
     /// Moves messages to their account's folder with this role (`archive`, `trash`, `inbox`),
@@ -879,7 +924,12 @@ mod tests {
         let account = store.accounts()?[0].id;
         store.update_account(account, &AccountUpdate {
             label: Some("Me".into()), sender_name: None, color: Some("#0f5e73".into()), signature: Some("<b>Me</b>".into()),
+            icon: None,
         })?;
+        store.set_flag(&[id], 'S', false)?;
+        assert_eq!(store.accounts()?[0].unread, 1);
+        assert_eq!(store.mark_account_read(account)?, vec![id]);
+        assert_eq!(store.accounts()?[0].unread, 0);
         assert_eq!(store.accounts()?[0].label.as_deref(), Some("Me"));
         store.remove_account(account)?;
         assert!(store.accounts()?.is_empty() && store.search("hello", 10)?.is_empty());

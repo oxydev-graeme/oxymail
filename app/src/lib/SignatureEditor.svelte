@@ -6,7 +6,7 @@
   let { value = $bindable("") } = $props();
 
   let mode = $state("visual");
-  let editor;
+  let editor = $state();
 
   $effect(() => {
     if (mode === "visual" && editor && editor.innerHTML !== value) editor.innerHTML = value;

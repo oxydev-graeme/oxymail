@@ -5,6 +5,7 @@
   import Logo from "./lib/Logo.svelte";
   import Icon from "./lib/Icon.svelte";
   import Settings from "./lib/Settings.svelte";
+  import Avatar from "./lib/Avatar.svelte";
 
   const PAGE = 200;
   const appWindow = getCurrentWindow();
@@ -13,9 +14,11 @@
   let showSettings = $state(false);
 
   let accounts = $state([]);
-  let foldersByAccount = $state({});
-  let expanded = $state({});
+  let accountId = $state(null);
+  let folders = $state([]);
   let folder = $state(null);
+
+  let account = $derived(accounts.find((a) => a.id === accountId) ?? null);
 
   let list = $state([]);
   let listDone = $state(false);
@@ -55,31 +58,62 @@
   async function loadAccounts() {
     try {
       accounts = await api.accounts();
-      const ids = new Set(accounts.map((a) => a.id));
-      if (folder && !ids.has(folder.account_id)) {
+      if (!accounts.some((a) => a.id === accountId)) {
+        accountId = null;
+        folders = [];
         folder = null;
         list = [];
         selectedId = null;
         view = null;
-      }
-      for (const id of Object.keys(foldersByAccount)) if (!ids.has(Number(id))) delete foldersByAccount[id];
-      if (accounts.length && folder === null) {
-        await toggleAccount(accounts[0].id, true);
-        const first = foldersByAccount[accounts[0].id]?.[0];
-        if (first) openFolder(first);
+        if (accounts.length) await selectAccount(accounts[0].id);
       }
     } catch (e) {
       error = String(e);
     }
   }
 
-  async function toggleAccount(id, open = !expanded[id]) {
-    expanded[id] = open;
-    if (open && !foldersByAccount[id]) await refreshFolders(id);
+  /** Shows an account's folders below the account list and opens its Inbox. */
+  async function selectAccount(id) {
+    accountId = id;
+    folders = await api.folders(id);
+    const inbox = folders.find((f) => f.role === "inbox") ?? folders[0];
+    if (inbox) await openFolder(inbox);
+    else {
+      folder = null;
+      list = [];
+    }
   }
 
-  async function refreshFolders(accountId) {
-    foldersByAccount[accountId] = await api.folders(accountId);
+  /** Reloads unread counts after a change in `changedAccount`. */
+  async function refreshFolders(changedAccount) {
+    accounts = await api.accounts();
+    if (changedAccount === accountId) {
+      folders = await api.folders(accountId);
+      if (folder) folder = folders.find((f) => f.id === folder.id) ?? folder;
+    }
+  }
+
+  async function markFolderRead() {
+    if (!folder) return;
+    const ids = await api.markFolderRead(folder.id);
+    afterMarkRead(ids, accountId, `Marked ${ids.length.toLocaleString()} as read in ${folder.name}`);
+  }
+
+  async function markAccountRead(a) {
+    const ids = await api.markAccountRead(a.id);
+    afterMarkRead(ids, a.id, `Marked ${ids.length.toLocaleString()} as read in ${a.label || a.name}`);
+  }
+
+  function afterMarkRead(ids, changedAccount, label) {
+    const changed = new Set(ids);
+    for (const m of list) if (changed.has(m.id)) m.unread = false;
+    refreshFolders(changedAccount);
+    if (!ids.length) return;
+    flash(label, async () => {
+      await act(() => api.setFlag(ids, "S", false));
+      for (const m of list) if (changed.has(m.id)) m.unread = true;
+      refreshFolders(changedAccount);
+    });
   }
 
   async function openFolder(f) {
@@ -277,6 +311,8 @@
   }
 
   const sender = (m) => m.from_name || m.from_addr || "(no sender)";
+  const folderIcon = (role) =>
+    ({ inbox: "inbox", sent: "send", drafts: "draft", archive: "archive", spam: "spam", trash: "trash" })[role] ?? "folder";
   const showUnread = (f) => f.unread > 0 && !["sent", "trash", "spam", "drafts"].includes(f.role);
 </script>
 
@@ -307,27 +343,36 @@
 
   <div class="shell">
     <aside class="sidebar">
-      <nav>
-        {#each accounts as account (account.id)}
-          <div class="account">
-            <button class="account-name" onclick={() => toggleAccount(account.id)} title={account.name}>
-              <span class="chevron" class:open={expanded[account.id]}>›</span>
-              <span class="dot" style:background={account.color || "var(--faint)"}></span>
-              <span class="ellipsis">{accountLabel(account)}</span>
+      <div class="section">Accounts</div>
+      <nav class="accounts">
+        {#each accounts as a (a.id)}
+          <div class="account" class:active={a.id === accountId}>
+            <button class="account-main" onclick={() => selectAccount(a.id)} title={a.name}>
+              <Avatar account={a} size={24} />
+              <span class="ellipsis">{accountLabel(a)}</span>
+              {#if a.unread > 0}<span class="count">{a.unread.toLocaleString()}</span>{/if}
             </button>
-            {#if expanded[account.id]}
-              {#each foldersByAccount[account.id] ?? [] as f (f.id)}
-                <button class="folder" class:active={f.id === folder?.id && !searching} onclick={() => openFolder(f)}>
-                  <span class="ellipsis">{f.name}</span>
-                  {#if showUnread(f)}<span class="count">{f.unread.toLocaleString()}</span>{/if}
-                </button>
-              {/each}
+            {#if a.unread > 0}
+              <button class="account-read" onclick={() => markAccountRead(a)} title="Mark all as read in this account">
+                <Icon name="checks" size={14} />
+              </button>
             {/if}
           </div>
         {/each}
       </nav>
-      {#if accounts.length}
-        <div class="sidebar-foot">{accounts.length} archive accounts</div>
+      {#if account}
+        <div class="section folders-head">
+          <span class="ellipsis">Folders · {accountLabel(account)}</span>
+        </div>
+        <nav class="folders">
+          {#each folders as f (f.id)}
+            <button class="folder" class:active={f.id === folder?.id && !searching} onclick={() => openFolder(f)}>
+              <Icon name={folderIcon(f.role)} size={15} />
+              <span class="ellipsis">{f.name}</span>
+              {#if showUnread(f)}<span class="count">{f.unread.toLocaleString()}</span>{/if}
+            </button>
+          {/each}
+        </nav>
       {/if}
     </aside>
 
@@ -335,6 +380,11 @@
       <div class="list-title">
         <span class="ellipsis">{searching ? `Results for “${query}”` : (folder?.name ?? "")}</span>
         {#if searching && !loadingList}<span class="muted">{list.length}</span>{/if}
+        {#if !searching && folder?.unread > 0}
+          <button class="mark-read" onclick={markFolderRead} title="Mark every message in this folder as read">
+            <Icon name="checks" size={14} /> Mark all read
+          </button>
+        {/if}
       </div>
       <div class="list" onscroll={onListScroll}>
         {#each list as m (m.id)}
@@ -507,23 +557,31 @@
   .shell { display: grid; grid-template-columns: 250px 380px 1fr; min-height: 0; }
 
   /* ---- Sidebar ---- */
-  .sidebar { display: flex; flex-direction: column; background: var(--sidebar); border-right: 1px solid var(--border); min-width: 0; }
-  nav { flex: 1; overflow-y: auto; padding: 10px 8px 12px; }
-  .account { margin-bottom: 2px; }
-  .account-name { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 8px; border-radius: 6px; font-weight: 600; font-size: 13px; text-align: left; }
-  .account-name:hover { background: var(--hover); }
-  .chevron { display: inline-block; width: 10px; color: var(--muted); transition: transform 0.12s; }
-  .chevron.open { transform: rotate(90deg); }
-  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .folder { display: flex; justify-content: space-between; gap: 8px; width: 100%; padding: 5px 8px 5px 26px; border-radius: 6px; font-size: 13px; text-align: left; color: var(--muted); }
+  .sidebar { display: flex; flex-direction: column; background: var(--sidebar); border-right: 1px solid var(--border); min-width: 0; min-height: 0; }
+  .section { padding: 12px 16px 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
+  .folders-head { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 12px; display: flex; }
+  .accounts { flex: 0 1 auto; max-height: 52%; overflow-y: auto; padding: 0 8px; }
+  .folders { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
+  .account { position: relative; display: flex; align-items: center; border-radius: 7px; }
+  .account:hover { background: var(--hover); }
+  .account.active { background: var(--selected); }
+  .account-main { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; padding: 5px 8px; text-align: left; font-size: 13px; }
+  .account.active .account-main { font-weight: 600; }
+  .account-read { display: none; place-items: center; width: 26px; height: 26px; margin-right: 4px; border-radius: 6px; color: var(--muted); }
+  .account:hover .account-read { display: grid; }
+  .account:hover .account-main .count { display: none; }
+  .account-read:hover { background: var(--panel); color: var(--accent); }
+  .folder { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 8px 6px 10px; border-radius: 6px; font-size: 13px; text-align: left; color: var(--muted); }
+  .folder .ellipsis { flex: 1; }
   .folder:hover { background: var(--hover); color: var(--text); }
   .folder.active { background: var(--selected); color: var(--text); font-weight: 600; }
-  .count { font-size: 12px; color: var(--accent); font-weight: 700; }
-  .sidebar-foot { padding: 10px 18px; font-size: 12px; color: var(--faint); border-top: 1px solid var(--border); }
+  .count { margin-left: auto; font-size: 11px; font-weight: 700; padding: 0 7px; border-radius: 99px; background: var(--accent); color: #fff; line-height: 18px; }
 
   /* ---- Message list ---- */
   .list-pane { display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--border); min-width: 0; }
-  .list-title { display: flex; justify-content: space-between; gap: 8px; padding: 12px 16px 10px; font-weight: 700; font-size: 14px; border-bottom: 1px solid var(--border); }
+  .mark-read { display: flex; align-items: center; gap: 5px; margin-left: auto; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 500; color: var(--accent); }
+  .mark-read:hover { background: var(--accent-soft); }
+  .list-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 16px 10px; font-weight: 700; font-size: 14px; border-bottom: 1px solid var(--border); }
   .list { flex: 1; overflow-y: auto; }
   .row { position: relative; border-bottom: 1px solid var(--border); border-left: 3px solid transparent; }
   .row:hover { background: var(--bg); }

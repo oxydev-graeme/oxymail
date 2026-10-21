@@ -19,10 +19,38 @@ export const api = {
   reorderAccounts: (ids) => invoke("reorder_accounts", { ids }),
   updateAccount: (id, update) => invoke("update_account", { id, update }),
   removeAccount: (id) => invoke("remove_account", { id }),
+  markFolderRead: (folderId) => invoke("mark_folder_read", { folderId }),
+  markAccountRead: (accountId) => invoke("mark_account_read", { accountId }),
 };
 
 /** Sidebar name for an account: its label, else its address. */
 export const accountLabel = (a) => a.label || a.name;
+
+/**
+ * Reads an image file and returns it as a square PNG data URI, centre-cropped and scaled to
+ * `size` pixels, so account icons stay small in the database.
+ */
+export function imageToIcon(file, size = 96) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("That file isn't an image OxyMail can read."));
+      img.onload = () => {
+        const side = Math.min(img.width, img.height);
+        const canvas = document.createElement("canvas");
+        canvas.width = canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, size, size);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 export const DEFAULT_SETTINGS = {
   theme: "system",

@@ -114,6 +114,16 @@ fn remove_account(state: State<AppState>, id: i64) -> Res<()> {
 }
 
 #[tauri::command]
+fn mark_folder_read(state: State<AppState>, folder_id: i64) -> Res<Vec<i64>> {
+    state.0.lock().map_err(err)?.mark_folder_read(folder_id).map_err(err)
+}
+
+#[tauri::command]
+fn mark_account_read(state: State<AppState>, account_id: i64) -> Res<Vec<i64>> {
+    state.0.lock().map_err(err)?.mark_account_read(account_id).map_err(err)
+}
+
+#[tauri::command]
 fn data_location() -> String {
     Store::default_path().display().to_string()
 }
@@ -149,7 +159,9 @@ fn main() {
             data_location,
             reorder_accounts,
             update_account,
-            remove_account
+            remove_account,
+            mark_folder_read,
+            mark_account_read
         ])
         .run(tauri::generate_context!())
         .expect("running OxyMail");
