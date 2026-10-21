@@ -22,6 +22,38 @@
 
   let account = $derived(accounts.find((a) => a.id === accountId) ?? null);
   let allInboxUnread = $derived(accounts.reduce((n, a) => n + a.unread, 0));
+  let drafts = $state([]);
+
+  async function refreshDrafts() {
+    drafts = await api.drafts().catch(() => []);
+    if (folder?.localDrafts) list = draftRows();
+  }
+
+  const draftRows = () =>
+    drafts.map((d) => ({
+      id: `draft-${d.id}`,
+      draft: d,
+      date: d.updated,
+      from_name: d.recipients ? `To: ${d.recipients}` : "(no recipients)",
+      subject: d.subject || "(no subject)",
+      snippet: "",
+      unread: false,
+      starred: false,
+      attachments: 0,
+    }));
+
+  function openDrafts() {
+    accountId = null;
+    folders = [];
+    folder = { id: "drafts", localDrafts: true, name: "Unsent drafts" };
+    query = "";
+    searching = false;
+    selectedId = null;
+    selectedIds = [];
+    view = null;
+    list = draftRows();
+    listDone = true;
+  }
 
   function openAllInboxes() {
     accountId = null;
@@ -62,6 +94,8 @@
   let selectedMsgs = $derived(list.filter((m) => selectedIds.includes(m.id)));
   let moving = $state(null);
   let remoteAllowed = $state(false);
+  /** Other messages in the open message's conversation. */
+  let conversation = $state([]);
   /** Role of the folder the selected message is in (search results can span folders). */
   let selectedRole = $derived(selected?.folder_role ?? null);
   let selectedLive = $derived(isLive(accounts.find((a) => a.id === selected?.account_id)));
@@ -79,6 +113,7 @@
       error = String(e);
     }
     await loadAccounts();
+    refreshDrafts();
 
     listen("sync-status", ({ payload }) => {
       syncing[payload.account_id] = payload.text;
@@ -257,7 +292,9 @@
 
   /** A page of the current folder, or of every Inbox for the "All inboxes" view. */
   const fetchPage = (offset, limit) =>
-    folder.unified ? api.messagesByRole("inbox", offset, limit) : api.messages(folder.id, offset, limit);
+    folder.localDrafts
+      ? Promise.resolve(offset ? [] : draftRows())
+      : folder.unified ? api.messagesByRole("inbox", offset, limit) : api.messages(folder.id, offset, limit);
 
   async function loadMore() {
     if (loadingList || listDone || searching || !folder) return;
@@ -298,8 +335,10 @@
     selectedIds = [id];
     anchorId = id;
     remoteAllowed = false;
+    conversation = [];
     try {
       view = await api.message(id);
+      api.thread(id).then((t) => (conversation = selectedId === id ? t : conversation)).catch(() => (conversation = []));
       const m = list.find((x) => x.id === id);
       if (m?.unread && settings.mark_read_on_open === "true") {
         await api.setFlag([id], "S", true);
@@ -385,6 +424,7 @@
 
   /** Ctrl/Cmd-click toggles a message in the selection; Shift-click selects a range. */
   function rowClick(event, m) {
+    if (m.draft) return (composing = JSON.parse(m.draft.body));
     if (event.ctrlKey || event.metaKey) {
       selectedIds = selectedIds.includes(m.id) ? selectedIds.filter((x) => x !== m.id) : [...selectedIds, m.id];
       anchorId = m.id;
@@ -471,6 +511,12 @@
   }
 
   // ---- Reader extras ----------------------------------------------------------
+
+  /** Opens a message from the conversation list, even when it isn't in the visible list. */
+  async function openFromThread(t) {
+    if (!list.some((m) => m.id === t.id)) list = [t, ...list];
+    await select(t.id);
+  }
 
   async function allowSender() {
     if (!view?.from_addr) return;
@@ -572,6 +618,8 @@
     const send = async () => {
       try {
         flash(await api.sendMessage(accountId, mail));
+        if (reopen.draft_id) await api.deleteDraft(reopen.draft_id).catch(() => {});
+        refreshDrafts();
       } catch (e) {
         composing = { ...reopen, error: `Not sent: ${e}` };
       }
@@ -651,6 +699,17 @@
           </button>
         </div>
       </nav>
+      {#if drafts.length}
+        <nav class="accounts unified">
+          <div class="account" class:active={folder?.localDrafts}>
+            <button class="account-main" onclick={openDrafts}>
+              <span class="all-icon"><Icon name="draft" size={15} /></span>
+              <span class="ellipsis">Unsent drafts</span>
+              <span class="count muted-count">{drafts.length}</span>
+            </button>
+          </div>
+        </nav>
+      {/if}
       <div class="section">Accounts</div>
       <nav class="accounts">
         {#each accounts as a (a.id)}
@@ -720,7 +779,7 @@
             class="row"
             class:selected={selectedIds.includes(m.id)}
             class:unread={m.unread}
-            draggable="true"
+            draggable={!m.draft}
             ondragstart={(e) => dragRows(e, m)}
             role="listitem"
           >
@@ -743,7 +802,7 @@
                 </div>
               {/if}
             </button>
-            <div class="row-actions">
+            <div class="row-actions" class:hidden={m.draft}>
               <button class:starred={m.starred} onclick={() => toggleStar(m)} title={m.starred ? "Unstar" : "Star"}>
                 <Icon name="star" size={15} />
               </button>
@@ -835,6 +894,22 @@
             </div>
           </div>
           {#each view.notices as notice}<div class="notice">{notice}</div>{/each}
+          {#if conversation.length > 1}
+            <details class="thread">
+              <summary>{conversation.length} messages in this conversation</summary>
+              <ol>
+                {#each conversation as t (t.id)}
+                  <li>
+                    <button class:current={t.id === view.id} onclick={() => openFromThread(t)} disabled={t.id === view.id}>
+                      <span class="t-from ellipsis">{sender(t)}</span>
+                      <span class="t-folder">{t.folder_name}</span>
+                      <span class="t-date">{shortDate(t.date)}</span>
+                    </button>
+                  </li>
+                {/each}
+              </ol>
+            </details>
+          {/if}
           {#if view.attachments.length}
             <div class="attachments">
               {#each view.attachments as a (a.index)}
@@ -872,7 +947,7 @@
       {:else}
         <div class="placeholder">
           <Logo size={40} />
-          <p>Select a message to read it.</p>
+          <p>{folder?.localDrafts ? "Click a draft to keep writing it." : "Select a message to read it."}</p>
         </div>
       {/if}
     </main>
@@ -904,8 +979,8 @@
   <Compose
     draft={composing}
     accounts={liveAccounts}
-    onclose={() => (composing = null)}
     onsend={queueSend}
+    onclose={(kept) => { composing = null; refreshDrafts(); if (kept) flash("Saved to Drafts"); }}
   />
 {/if}
 
@@ -986,6 +1061,7 @@
   .account:hover { background: var(--hover); }
   .account.active { background: var(--selected); }
   .unified { padding-top: 10px; }
+  .muted-count { background: var(--hover); color: var(--muted); }
   .all-icon { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 30%; background: var(--accent-soft); color: var(--accent); flex-shrink: 0; }
   .acct-dot { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; vertical-align: 1px; }
   .account-main { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; padding: 5px 8px; text-align: left; font-size: 13px; }
@@ -1034,6 +1110,7 @@
     box-shadow: 0 2px 6px rgb(0 0 0 / 0.08);
   }
   .row:hover .row-actions { display: flex; }
+  .row:hover .row-actions.hidden { display: none; }
   .row-actions button { display: grid; place-items: center; width: 28px; height: 26px; border-radius: 5px; color: var(--muted); }
   .row-actions button:hover { background: var(--hover); color: var(--text); }
   .row-actions button.starred, .toolbar button.starred { color: var(--star); }
@@ -1068,6 +1145,15 @@
   .chip-open { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 6px 4px 6px 10px; }
   .chip-save { display: grid; place-items: center; padding: 6px 8px; border-left: 1px solid var(--border); color: var(--muted); }
   .chip-save:hover { color: var(--accent); }
+  .thread { margin-top: 10px; font-size: 13px; }
+  .thread summary { cursor: pointer; color: var(--accent); }
+  .thread ol { margin: 6px 0 0; padding: 0; list-style: none; border: 1px solid var(--border); border-radius: 8px; max-height: 220px; overflow-y: auto; }
+  .thread li + li { border-top: 1px solid var(--border); }
+  .thread li button { display: grid; grid-template-columns: minmax(0, 1fr) auto 70px; gap: 10px; width: 100%; padding: 6px 10px; text-align: left; font-size: 12px; }
+  .thread li button:hover:not(:disabled) { background: var(--hover); }
+  .thread li button.current { background: var(--selected); font-weight: 600; cursor: default; }
+  .t-folder { color: var(--muted); }
+  .t-date { color: var(--muted); text-align: right; }
   .date-line { display: flex; align-items: center; gap: 10px; }
   .unsub { padding: 1px 8px; border: 1px solid var(--border); border-radius: 99px; font-size: 12px; color: var(--muted); }
   .unsub:hover { border-color: var(--accent); color: var(--accent); }

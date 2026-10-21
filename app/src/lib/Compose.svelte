@@ -1,6 +1,6 @@
 <script>
   import { onMount, untrack } from "svelte";
-  import { accountLabel, fileToBase64, formatSize } from "./api.js";
+  import { api, accountLabel, fileToBase64, formatSize } from "./api.js";
   import Icon from "./Icon.svelte";
   import RecipientInput from "./RecipientInput.svelte";
 
@@ -28,6 +28,40 @@
   let editor = $state();
 
   let account = $derived(accounts.find((a) => a.id === accountId));
+
+  // ---- Autosave to local drafts --------------------------------------------
+  let draftId = $state(initial.draft_id ?? null);
+  let bodyVersion = $state(0);
+  let saveTimer;
+
+  function snapshot() {
+    return { ...initial, account_id: accountId, to, cc, bcc, subject, html: editor?.innerHTML ?? "", attachments, forwarded, draft_id: draftId, error: undefined };
+  }
+
+  const hasContent = () => Boolean(to.trim() || cc.trim() || bcc.trim() || subject.trim() || editor?.innerText.trim() || attachments.length);
+
+  async function saveDraft() {
+    clearTimeout(saveTimer);
+    if (!editor || !hasContent()) return;
+    try {
+      draftId = await api.saveDraft(draftId, accountId ?? null, subject, to, JSON.stringify(snapshot()));
+    } catch {
+      // Autosave is best-effort; the Compose window still holds everything.
+    }
+  }
+
+  $effect(() => {
+    // Re-run on any change to the fields or the body.
+    [to, cc, bcc, subject, attachments, forwarded, accountId, bodyVersion];
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveDraft, 1200);
+  });
+
+  async function discard() {
+    clearTimeout(saveTimer);
+    if (draftId) await api.deleteDraft(draftId).catch(() => {});
+    onclose(false);
+  }
 
   onMount(() => {
     editor.innerHTML =
@@ -88,14 +122,22 @@
       forward_from: forwarded.length ? initial.forward_from : null,
       forward_attachments: forwarded.map((a) => a.index),
     };
-    const reopen = { ...initial, account_id: account.id, to, cc, bcc, subject, html: editor.innerHTML, attachments, forwarded };
+    clearTimeout(saveTimer);
+    await saveDraft();
+    const reopen = { ...snapshot(), account_id: account.id };
     onsend(account.id, mail, reopen);
   }
 
-  function close() {
-    const hasContent = to || subject || editor?.innerText.trim() || attachments.length;
-    if (hasContent && !initial.quote && !confirm("Discard this message?")) return;
-    onclose();
+  /** Closing keeps the message as a draft; Discard throws it away. */
+  async function close() {
+    clearTimeout(saveTimer);
+    if (hasContent()) {
+      await saveDraft();
+      onclose(true);
+    } else {
+      if (draftId) await api.deleteDraft(draftId).catch(() => {});
+      onclose(false);
+    }
   }
 
   function onKey(event) {
@@ -114,7 +156,7 @@
   <div class="compose" role="dialog" aria-label="New message">
     <header>
       <span class="title">{subject || "New message"}</span>
-      <button class="icon" onclick={close} title="Close (Esc)"><Icon name="x" /></button>
+      <button class="icon" onclick={close} title="Close and keep as draft (Esc)"><Icon name="x" /></button>
     </header>
 
     {#if !accounts.length}
@@ -157,7 +199,7 @@
         </label>
       </div>
 
-      <div class="editor" contenteditable="true" role="textbox" aria-multiline="true" tabindex="0" bind:this={editor}></div>
+      <div class="editor" contenteditable="true" role="textbox" aria-multiline="true" tabindex="0" bind:this={editor} oninput={() => bodyVersion++}></div>
 
       {#if attachments.length || forwarded.length}
         <div class="attachments">
@@ -182,6 +224,7 @@
       <footer>
         {#if error}<span class="error">{error}</span>{:else if initial.error}<span class="error">{initial.error}</span>{:else if initial.note}<span class="muted">{initial.note}</span>{/if}
         <span class="grow"></span>
+        <button class="ghost" onclick={discard} title="Delete this draft">Discard</button>
         <span class="muted">Ctrl+Enter</span>
         <button class="primary" onclick={send}>Send</button>
       </footer>
@@ -236,6 +279,8 @@
   .chip button { display: grid; place-items: center; color: var(--muted); }
   .chip .muted { white-space: nowrap; flex-shrink: 0; }
   footer { display: flex; align-items: center; gap: 12px; padding: 10px 18px; border-top: 1px solid var(--border); }
+  .ghost { padding: 7px 12px; border-radius: 8px; font-size: 13px; color: var(--muted); }
+  .ghost:hover { background: var(--hover); color: var(--danger); }
   .primary { padding: 8px 22px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; }
   .primary:disabled { opacity: 0.6; cursor: default; }
   .muted { color: var(--muted); font-size: 12px; }

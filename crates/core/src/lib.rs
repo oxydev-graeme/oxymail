@@ -60,6 +60,7 @@ create table if not exists messages (
     deleted integer not null default 0,
     uid integer,
     from_archive integer not null default 0,
+    thread_key text,
     unique (origin_folder_id, file)
 );
 create index if not exists messages_folder_date on messages(folder_id, deleted, date desc);
@@ -74,6 +75,14 @@ create table if not exists contacts (
     in_address_book integer not null default 0,
     blocked integer not null default 0,
     images_allowed integer not null default 0
+);
+create table if not exists drafts (
+    id integer primary key,
+    account_id integer,
+    subject text,
+    recipients text,
+    body text not null,
+    updated integer not null
 );
 create table if not exists settings (
     key text primary key,
@@ -242,6 +251,17 @@ pub struct MessageView {
     pub images_allowed: bool,
     /// Unsubscribe targets from List-Unsubscribe: https: and mailto: URLs.
     pub unsubscribe: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Draft {
+    pub id: i64,
+    pub account_id: Option<i64>,
+    pub subject: Option<String>,
+    pub recipients: Option<String>,
+    /// The Compose window's state, as JSON.
+    pub body: String,
+    pub updated: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -771,6 +791,50 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The other messages in a message's conversation (same account), oldest first.
+    pub fn thread(&self, id: i64) -> Result<Vec<MessageSummary>> {
+        let (key, account): (Option<String>, i64) = self.db.query_row(
+            "select m.thread_key, f.account_id from messages m join folders f on f.id = m.folder_id where m.id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let Some(key) = key else { return Ok(Vec::new()) };
+        self.summaries(
+            "where m.thread_key = ?1 and f.account_id = ?2 and m.deleted = 0 order by m.date asc limit 100",
+            params![key, account],
+        )
+    }
+
+    /// Fills in conversation keys for messages indexed before threads existed. Returns how
+    /// many were updated; `progress` gets a running count.
+    pub fn backfill_threads(&mut self, mut progress: impl FnMut(usize)) -> Result<usize> {
+        let ids: Vec<i64> = self.db.prepare("select id from messages where thread_key is null")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        let parser = MessageParser::default();
+        let mut done = 0;
+        for chunk in ids.chunks(2000) {
+            let tx = self.db.transaction()?;
+            for id in chunk {
+                let path = {
+                    let (root, folder, file): (String, String, String) = tx.query_row(
+                        "select a.root, coalesce(f.dir, f.name), m.file from messages m
+                         join folders f on f.id = m.origin_folder_id join accounts a on a.id = f.account_id where m.id = ?1",
+                        [id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )?;
+                    if Path::new(&file).is_absolute() { PathBuf::from(file) } else { Path::new(&root).join(folder).join(file) }
+                };
+                let Ok(raw) = fs::read(&path) else { continue };
+                if let Some(msg) = parser.parse_headers(&raw) {
+                    tx.execute("update messages set thread_key = ?1 where id = ?2", params![thread_key(&msg), id])?;
+                }
+                done += 1;
+            }
+            tx.commit()?;
+            progress(done);
+        }
+        Ok(done)
+    }
+
     /// Remembers whether remote images may load for mail from this sender.
     pub fn set_images_allowed(&self, email: &str, allowed: bool) -> Result<()> {
         note_contact(&self.db, email, None, 0, 0)?;
@@ -810,6 +874,40 @@ impl Store {
         )?)
     }
 
+    /// Saves an unsent message (the Compose state as JSON). Returns its id.
+    pub fn save_draft(&self, id: Option<i64>, account_id: Option<i64>, subject: &str, recipients: &str, body: &str) -> Result<i64> {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        match id {
+            Some(id) => {
+                self.db.execute(
+                    "update drafts set account_id = ?1, subject = ?2, recipients = ?3, body = ?4, updated = ?5 where id = ?6",
+                    params![account_id, subject, recipients, body, now, id],
+                )?;
+                Ok(id)
+            }
+            None => {
+                self.db.execute(
+                    "insert into drafts (account_id, subject, recipients, body, updated) values (?1, ?2, ?3, ?4, ?5)",
+                    params![account_id, subject, recipients, body, now],
+                )?;
+                Ok(self.db.last_insert_rowid())
+            }
+        }
+    }
+
+    pub fn drafts(&self) -> Result<Vec<Draft>> {
+        let mut stmt = self.db.prepare("select id, account_id, subject, recipients, body, updated from drafts order by updated desc")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Draft { id: r.get(0)?, account_id: r.get(1)?, subject: r.get(2)?, recipients: r.get(3)?, body: r.get(4)?, updated: r.get(5)? })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn delete_draft(&self, id: i64) -> Result<()> {
+        self.db.execute("delete from drafts where id = ?1", [id])?;
+        Ok(())
+    }
+
     pub fn settings(&self) -> Result<std::collections::BTreeMap<String, String>> {
         let mut stmt = self.db.prepare("select key, value from settings")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -829,6 +927,25 @@ impl Store {
 
 /// Parses `raw` and adds it to the index as `folder_id/rel`. Returns `None` if it isn't a
 /// readable message.
+/// Which conversation a message belongs to: Gmail's thread id when known, else the first
+/// message of its References chain, else what it replies to, else itself.
+fn thread_key(msg: &mail_parser::Message) -> Option<String> {
+    if let Some(thread) = msg.header_raw("X-GM-THRID") {
+        return Some(format!("gm:{}", thread.trim()));
+    }
+    let first_reference = match msg.references() {
+        mail_parser::HeaderValue::Text(t) => Some(t.to_string()),
+        mail_parser::HeaderValue::TextList(list) => list.first().map(|t| t.to_string()),
+        _ => None,
+    };
+    let parent = match msg.in_reply_to() {
+        mail_parser::HeaderValue::Text(t) => Some(t.to_string()),
+        mail_parser::HeaderValue::TextList(list) => list.first().map(|t| t.to_string()),
+        _ => None,
+    };
+    first_reference.or(parent).or_else(|| msg.message_id().map(str::to_string))
+}
+
 pub(crate) fn index_message(
     db: &Connection,
     parser: &MessageParser,
@@ -846,8 +963,8 @@ pub(crate) fn index_message(
     let from_addr = from.and_then(|a| a.address()).map(str::to_string);
     db.execute(
         "insert into messages (folder_id, origin_folder_id, file, date, from_name, from_addr, to_addrs,
-             subject, snippet, flags, attachments, message_id, uid)
-         values (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             subject, snippet, flags, attachments, message_id, uid, thread_key)
+         values (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             folder_id,
             rel,
@@ -861,6 +978,7 @@ pub(crate) fn index_message(
             msg.attachment_count() as i64,
             msg.message_id(),
             uid,
+            thread_key(&msg),
         ],
     )?;
     let id = db.last_insert_rowid();
@@ -919,7 +1037,12 @@ fn migrate(db: &Connection) -> Result<()> {
         }
     }
     add_missing_columns(db, "folders", FOLDER_COLUMNS_V4)?;
-    add_missing_columns(db, "messages", &[("uid", "integer"), ("from_archive", "integer not null default 0")])?;
+    add_missing_columns(
+        db,
+        "messages",
+        &[("uid", "integer"), ("from_archive", "integer not null default 0"), ("thread_key", "text")],
+    )?;
+    db.execute_batch("create index if not exists messages_thread on messages(thread_key)")?;
     add_missing_columns(db, "accounts", &[("archive_root", "text")])?;
     if db.query_row("select count(*) from sqlite_master where name = 'contacts'", [], |r| r.get::<_, i64>(0))? > 0 {
         add_missing_columns(db, "contacts", &[("images_allowed", "integer not null default 0")])?;

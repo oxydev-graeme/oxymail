@@ -52,6 +52,11 @@ const mock = () => {
       imap: { host: "mail.oxydev.co.za", port: 993, security: "tls" }, smtp: { host: "mail.oxydev.co.za", port: 465, security: "tls" } }),
     messages_by_role: () => msgs(100).map((m, k) => ({ ...m, account_id: (k % 6) + 1 })),
     suggest_contacts: () => [{ email: "paul@sarongi.co.za", name: "Paul McCree" }, { email: "plarkin@topfiremedia.com", name: "Paul Larkin" }, { email: "paul.another@example.com", name: null }],
+    thread: ({ id }) => [
+      { id: 900001, folder_id: 102, folder_name: "Sent", account_id: 1, date: now - 90000, from_name: "Graeme Bosworth", subject: "Tax Invoice - INV0000146", snippet: "", unread: false, starred: false, attachments: 0 },
+      { id, folder_id: 100, folder_name: "Inbox", account_id: 1, date: now - 3600, from_name: "Monica from Euro Appliances", subject: "RE: Tax Invoice - INV0000146", snippet: "", unread: false, starred: false, attachments: 1 },
+    ],
+    drafts: () => [{ id: 1, account_id: 9, subject: "Quote for Bay Solar", recipients: "darin@example.com", body: "{}", updated: now - 600 }],
     oauth_clients: () => ({ google: { client_id: "1234-abc.apps.googleusercontent.com", has_secret: true }, microsoft: { client_id: "", has_secret: false } }),
     connect_suggestion: () => ({ email: "hello@oxydev.co.za", username: "hello@oxydev.co.za", oauth: null,
       source: "your Mailbird settings (POP3 there; OxyMail uses IMAP on the same server)",
@@ -118,6 +123,8 @@ const shots = [
     const moved = calls.find((c) => c[0] === "move_to_folder");
     console.log("CHECK drag moved ids:", JSON.stringify(moved?.[1]?.ids), "to folder", moved?.[1]?.folderId, "(expect the 4th row, not the open one)");
   }],
+  ["conversation", 1360, 860, "dark", async (p) => { await p.click(".row-main"); await p.click("summary:has-text('conversation')"); }],
+  ["drafts", 1360, 860, "dark", async (p) => { await p.click("button:has-text('Unsent drafts')"); }],
   ["shortcuts", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Shortcuts & search")'); await p.locator(".content").evaluate((el) => (el.scrollTop = 400)); }],
   ["add-account-gmail", 1360, 860, "dark", async (p) => {
     await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")');

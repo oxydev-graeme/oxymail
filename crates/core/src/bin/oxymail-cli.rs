@@ -16,6 +16,16 @@ fn main() -> Result<()> {
             let stats = store.import_archive(root.as_ref(), |n| eprintln!("{n} indexed"))?;
             println!("{}", serde_json::to_string_pretty(&stats)?);
         }
+        Some("backfill-threads") => {
+            let n = store.backfill_threads(|n| eprintln!("{n} done"))?;
+            println!("{n} messages given a conversation key");
+        }
+        Some("thread") => {
+            let Some(id) = args.get(1).and_then(|s| s.parse().ok()) else { bail!("usage: oxymail-cli thread <id>") };
+            for m in store.thread(id)? {
+                println!("{:8}  {:30.30}  {}", m.id, m.from_name.or(m.from_addr).unwrap_or_default(), m.subject.unwrap_or_default());
+            }
+        }
         Some("accounts") => {
             for account in store.accounts()? {
                 println!("{:4}  {}", account.id, account.name);

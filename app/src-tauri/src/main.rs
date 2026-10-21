@@ -166,6 +166,26 @@ fn open_external(target: &str) -> Res<()> {
 }
 
 #[tauri::command]
+fn thread(state: State<AppState>, id: i64) -> Res<Vec<MessageSummary>> {
+    state.0.lock().map_err(err)?.thread(id).map_err(err)
+}
+
+#[tauri::command]
+fn save_draft(state: State<AppState>, id: Option<i64>, account_id: Option<i64>, subject: String, recipients: String, body: String) -> Res<i64> {
+    state.0.lock().map_err(err)?.save_draft(id, account_id, &subject, &recipients, &body).map_err(err)
+}
+
+#[tauri::command]
+fn drafts(state: State<AppState>) -> Res<Vec<oxymail_core::Draft>> {
+    state.0.lock().map_err(err)?.drafts().map_err(err)
+}
+
+#[tauri::command]
+fn delete_draft(state: State<AppState>, id: i64) -> Res<()> {
+    state.0.lock().map_err(err)?.delete_draft(id).map_err(err)
+}
+
+#[tauri::command]
 fn data_location() -> String {
     Store::default_path().display().to_string()
 }
@@ -215,6 +235,7 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 loop {
                     live::sync_accounts(handle.clone(), None).await;
+                    live::ensure_watchers(&handle);
                     tokio::time::sleep(live::SYNC_INTERVAL).await;
                 }
             });
@@ -250,6 +271,10 @@ fn main() {
             live::connect_suggestion,
             live::connect_archive,
             suggest_contacts,
+            thread,
+            save_draft,
+            drafts,
+            delete_draft,
             set_images_allowed,
             open_url,
             open_attachment,

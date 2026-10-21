@@ -3264,11 +3264,13 @@ name = "oxymail-mailbird-export"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "flate2",
  "mail-builder",
  "rusqlite",
+ "serde",
  "serde_json",
 ]
 

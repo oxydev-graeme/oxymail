@@ -21,6 +21,56 @@ pub const SYNC_INTERVAL: Duration = Duration::from_secs(180);
 #[derive(Default)]
 pub struct SyncState {
     running: Mutex<HashSet<i64>>,
+    /// Accounts with an Inbox push (IDLE) watcher running.
+    watching: Mutex<HashSet<i64>>,
+}
+
+/// RFC 2177 asks clients to re-issue IDLE at least every 29 minutes.
+const IDLE_WINDOW: Duration = Duration::from_secs(25 * 60);
+
+/// Starts an Inbox push watcher for every live account that doesn't have one. Called at
+/// start-up and after each periodic sync, so new accounts are picked up.
+pub fn ensure_watchers(app: &AppHandle) {
+    let Ok(store) = Store::open(&Store::default_path()) else { return };
+    for account in store.live_accounts().unwrap_or_default() {
+        let fresh = app.state::<SyncState>().watching.lock().map(|mut w| w.insert(account.id)).unwrap_or(false);
+        if fresh {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move { watch_inbox(app, account.id).await });
+        }
+    }
+}
+
+/// Keeps an IDLE connection to one account's Inbox and syncs the Inbox when it changes. Stops
+/// when the account is removed or the server has no IDLE (the 3-minute sync still covers it).
+async fn watch_inbox(app: AppHandle, account_id: i64) {
+    let mut failures = 0u32;
+    loop {
+        let Some(account) = Store::open(&Store::default_path()).ok().and_then(|s| s.live_account(account_id).ok().flatten()) else {
+            break;
+        };
+        let Ok(config) = config_of(&account.config) else { break };
+        let outcome = match oxymail_sync::credential(&config).await {
+            Ok(secret) => imap::idle_inbox(&config, &secret, IDLE_WINDOW).await,
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(true) => {
+                failures = 0;
+                sync_accounts(app.clone(), Some(account_id)).await;
+            }
+            Ok(false) => failures = 0,
+            Err(e) if format!("{e:#}").contains("doesn't support push") => break,
+            Err(_) => {
+                // Offline, asleep or signed out: back off, up to 10 minutes between tries.
+                failures += 1;
+                tokio::time::sleep(Duration::from_secs((30 * 2u64.pow(failures.min(5))).min(600))).await;
+            }
+        }
+    }
+    if let Ok(mut watching) = app.state::<SyncState>().watching.lock() {
+        watching.remove(&account_id);
+    }
 }
 
 /// Error text including the cause chain ("login failed: … : …").

@@ -21,6 +21,8 @@ use mail_builder::headers::text::Text;
 use rusqlite::{Connection, OpenFlags, types::ValueRef};
 use serde_json::{Map, Value, json};
 
+mod extras;
+
 #[derive(Parser)]
 #[command(about = "Export a Mailbird store to Maildir and JSON")]
 struct Args {
@@ -36,6 +38,9 @@ struct Args {
     /// Stop after this many messages (for test runs)
     #[arg(long)]
     limit: Option<usize>,
+    /// Only write contacts (vCard/CSV) and calendars (.ics); skip mail
+    #[arg(long)]
+    extras_only: bool,
 }
 
 // Folders.Identity values
@@ -108,6 +113,14 @@ fn main() -> Result<()> {
     fs::create_dir_all(&args.out)?;
     restrict_permissions(&args.out)?;
 
+    let extras = extras::export(&db, &args.store, &args.out)?;
+    eprintln!(
+        "contacts: {} in the address book, {} collected addresses; calendars: {} with {} events",
+        extras.contacts, extras.collected_addresses, extras.calendars, extras.events
+    );
+    if args.extras_only {
+        return Ok(());
+    }
     dump_raw_tables(&db, &args.out.join("raw"))?;
     let stats = export_mail(&db, &args)?;
     write_report(&args.out, &stats)?;

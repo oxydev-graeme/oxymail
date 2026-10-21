@@ -424,6 +424,30 @@ fn uid_set(uids: &[u32]) -> String {
     uids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
 }
 
+/// Waits for the server to report a change in the Inbox (IMAP IDLE), for up to `wait`.
+/// Returns true when something changed, false on timeout. Errors if the server lacks IDLE.
+pub async fn idle_inbox(config: &AccountConfig, password: &str, wait: Duration) -> Result<bool> {
+    let mut session = connect(config, password).await?;
+    if !session.capabilities().await?.has_str("IDLE") {
+        bail!("the server doesn't support push (IDLE)");
+    }
+    let inbox = folders(&mut session)
+        .await?
+        .into_iter()
+        .find(|f| f.role == Some("inbox"))
+        .map(|f| f.remote_name)
+        .unwrap_or_else(|| "INBOX".to_string());
+    session.examine(&inbox).await?;
+    let mut idle = session.idle();
+    idle.init().await?;
+    let (waiting, _stop) = idle.wait_with_timeout(wait);
+    let changed = matches!(waiting.await?, async_imap::extensions::idle::IdleResponse::NewData(_));
+    if let Ok(mut session) = idle.done().await {
+        let _ = session.logout().await;
+    }
+    Ok(changed)
+}
+
 /// Checks that we can log in, for the add-account form.
 pub async fn test_login(config: &AccountConfig, password: &str) -> Result<()> {
     let mut session = connect(config, password).await?;
