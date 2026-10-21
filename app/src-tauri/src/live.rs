@@ -252,9 +252,15 @@ fn notify_new_mail(app: &AppHandle, store: &Store, account: &str, report: &imap:
 
 /// Sends a message from a live account, files it in Sent, then syncs that account.
 #[tauri::command]
-pub async fn send_message(app: AppHandle, state: State<'_, AppState>, account_id: i64, mut mail: Outgoing) -> Res<String> {
+pub async fn send_message(app: AppHandle, account_id: i64, mail: Outgoing) -> Res<String> {
+    deliver(&app, account_id, mail).await
+}
+
+/// Builds and sends a message, files it in Sent and syncs the account. Used by Send, the
+/// undo-send timer and scheduled sending; opens its own database connection.
+pub async fn deliver(app: &AppHandle, account_id: i64, mut mail: Outgoing) -> Res<String> {
     let (config, sender_name) = {
-        let store = state.0.lock().map_err(err)?;
+        let store = Store::open(&Store::default_path()).map_err(err)?;
         if let Some(original) = mail.forward_from {
             use base64::Engine;
             for index in mail.forward_attachments.clone() {
@@ -270,20 +276,17 @@ pub async fn send_message(app: AppHandle, state: State<'_, AppState>, account_id
                     data: base64::engine::general_purpose::STANDARD.encode(data),
                 });
             }
+            mail.forward_attachments.clear();
+            mail.forward_from = None;
         }
         let live = store.live_account(account_id).map_err(err)?.ok_or("only live accounts can send")?;
-        let sender = store
-            .accounts()
-            .map_err(err)?
-            .into_iter()
-            .find(|a| a.id == account_id)
-            .and_then(|a| a.sender_name);
+        let sender = store.accounts().map_err(err)?.into_iter().find(|a| a.id == account_id).and_then(|a| a.sender_name);
         (config_of(&live.config)?, sender)
     };
     let password = oxymail_sync::credential(&config).await.map_err(full)?;
     let raw = smtp::build(sender_name.as_deref(), &config.email, &mail).map_err(full)?;
     smtp::send(&config, &password, &mail, &raw).await.map_err(full)?;
-    if let Ok(store) = state.0.lock() {
+    if let Ok(store) = Store::open(&Store::default_path()) {
         let everyone: Vec<String> = mail.to.iter().chain(&mail.cc).chain(&mail.bcc).cloned().collect();
         let _ = store.note_sent_to(&everyone);
     }
@@ -298,6 +301,50 @@ pub async fn send_message(app: AppHandle, state: State<'_, AppState>, account_id
     let handle = app.clone();
     tauri::async_runtime::spawn(async move { sync_accounts(handle, Some(account_id)).await });
     Ok(note)
+}
+
+/// Queues a message for later. `mail` is the outgoing message, `draft` the Compose state.
+#[tauri::command]
+pub fn schedule_send(state: State<'_, AppState>, account_id: i64, send_at: i64, mail: Outgoing, draft: String) -> Res<i64> {
+    let summary = format!("{} — {}", mail.to.first().cloned().unwrap_or_default(), mail.subject);
+    let json = serde_json::to_string(&mail).map_err(err)?;
+    state.0.lock().map_err(err)?.schedule(account_id, send_at, &json, &draft, &summary).map_err(err)
+}
+
+/// Runs every 30 seconds: brings back snoozed mail and sends scheduled messages that are due.
+pub async fn tick(app: &AppHandle) {
+    use tauri_plugin_notification::NotificationExt;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let Ok(mut store) = Store::open(&Store::default_path()) else { return };
+
+    if let Ok(woke) = store.wake_snoozed(now) {
+        let accounts: HashSet<i64> = woke.iter().map(|m| m.account_id).collect();
+        for account_id in accounts {
+            let _ = app.emit("mail-changed", json!({ "account_id": account_id }));
+        }
+        if let Some(first) = woke.first() {
+            let title = if woke.len() == 1 { "Snoozed message is back".to_string() } else { format!("{} snoozed messages are back", woke.len()) };
+            let body = format!("{}: {}", first.from_name.clone().or(first.from_addr.clone()).unwrap_or_default(), first.subject.clone().unwrap_or_default());
+            let _ = app.notification().builder().title(title).body(body).show();
+        }
+    }
+
+    for item in store.scheduled().unwrap_or_default().into_iter().filter(|s| s.send_at <= now && s.error.is_none()) {
+        let Ok(mail) = serde_json::from_str::<Outgoing>(&item.mail) else {
+            let _ = store.set_schedule_error(item.id, Some("the saved message couldn't be read"));
+            continue;
+        };
+        match deliver(app, item.account_id, mail).await {
+            Ok(_) => {
+                let _ = store.unschedule(item.id);
+                let _ = app.notification().builder().title("Scheduled message sent").body(item.summary.clone().unwrap_or_default()).show();
+            }
+            Err(e) => {
+                let _ = store.set_schedule_error(item.id, Some(&e));
+            }
+        }
+        let _ = app.emit("scheduled-changed", ());
+    }
 }
 
 /// Mirrors read/starred changes to the server for messages in live accounts. Runs in the

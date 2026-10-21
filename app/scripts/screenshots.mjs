@@ -56,6 +56,8 @@ const mock = () => {
       { id: 900001, folder_id: 102, folder_name: "Sent", account_id: 1, date: now - 90000, from_name: "Graeme Bosworth", subject: "Tax Invoice - INV0000146", snippet: "", unread: false, starred: false, attachments: 0 },
       { id, folder_id: 100, folder_name: "Inbox", account_id: 1, date: now - 3600, from_name: "Monica from Euro Appliances", subject: "RE: Tax Invoice - INV0000146", snippet: "", unread: false, starred: false, attachments: 1 },
     ],
+    snoozed: () => msgs(100).slice(0, 3).map((m, k) => ({ ...m, snoozed_until: now + (k + 1) * 86400 })),
+    scheduled: () => [{ id: 1, account_id: 9, send_at: now + 7200, mail: "{}", draft: "{}", summary: "darin@example.com — Bay Solar proposal", error: null }],
     drafts: () => [{ id: 1, account_id: 9, subject: "Quote for Bay Solar", recipients: "darin@example.com", body: "{}", updated: now - 600 }],
     oauth_clients: () => ({ google: { client_id: "1234-abc.apps.googleusercontent.com", has_secret: true }, microsoft: { client_id: "", has_secret: false } }),
     connect_suggestion: () => ({ email: "hello@oxydev.co.za", username: "hello@oxydev.co.za", oauth: null,
@@ -125,6 +127,10 @@ const shots = [
   }],
   ["conversation", 1360, 860, "dark", async (p) => { await p.click(".row-main"); await p.click("summary:has-text('conversation')"); }],
   ["drafts", 1360, 860, "dark", async (p) => { await p.click("button:has-text('Unsent drafts')"); }],
+  ["snooze-menu", 1360, 860, "dark", async (p) => { await p.click(".row-main"); await p.keyboard.press("b"); }],
+  ["snoozed-view", 1360, 860, "dark", async (p) => { await p.click("button:has-text('Snoozed')"); await p.click(".row-main"); }],
+  ["scheduled-view", 1360, 860, "light", async (p) => { await p.click("button:has-text('Scheduled')"); }],
+  ["send-later", 1360, 860, "dark", async (p) => { await p.click(".compose-btn"); await p.fill("#compose-to", "darin@example.com"); await p.click("button:has-text('Send later')"); }],
   ["shortcuts", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Shortcuts & search")'); await p.locator(".content").evaluate((el) => (el.scrollTop = 400)); }],
   ["add-account-gmail", 1360, 860, "dark", async (p) => {
     await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")');

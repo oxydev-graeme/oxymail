@@ -8,6 +8,7 @@
   import Avatar from "./lib/Avatar.svelte";
   import Compose from "./lib/Compose.svelte";
   import MovePicker from "./lib/MovePicker.svelte";
+  import TimeMenu from "./lib/TimeMenu.svelte";
 
   const PAGE = 200;
   const appWindow = getCurrentWindow();
@@ -23,6 +24,99 @@
   let account = $derived(accounts.find((a) => a.id === accountId) ?? null);
   let allInboxUnread = $derived(accounts.reduce((n, a) => n + a.unread, 0));
   let drafts = $state([]);
+  let snoozedList = $state([]);
+  let scheduledList = $state([]);
+  /** Messages waiting for a snooze time from the menu. */
+  let snoozing = $state(null);
+
+  async function refreshQueues() {
+    snoozedList = await api.snoozed().catch(() => []);
+    scheduledList = await api.scheduled().catch(() => []);
+    if (folder?.snoozedView || folder?.scheduledView) refreshList();
+  }
+
+  const scheduledRows = () =>
+    scheduledList.map((x) => ({
+      id: `sched-${x.id}`,
+      scheduled: x,
+      date: x.send_at,
+      from_name: x.summary?.split(" — ")[0] ? `To: ${x.summary.split(" — ")[0]}` : "(no recipients)",
+      subject: x.summary?.split(" — ").slice(1).join(" — ") || "(no subject)",
+      snippet: x.error ? `Not sent: ${x.error}` : `Sends ${new Date(x.send_at * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}`,
+      unread: Boolean(x.error),
+      starred: false,
+      attachments: 0,
+    }));
+
+  function openQueue(kind) {
+    accountId = null;
+    folders = [];
+    folder = kind === "snoozed" ? { id: "snoozed", snoozedView: true, name: "Snoozed" } : { id: "scheduled", scheduledView: true, name: "Scheduled" };
+    query = "";
+    searching = false;
+    selectedId = null;
+    selectedIds = [];
+    view = null;
+    list = [];
+    listDone = false;
+    loadMore();
+  }
+
+  const when = (ts) => new Date(ts * 1000).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
+  function openSnooze() {
+    const msgs = multi ? selectedMsgs : selected ? [selected] : [];
+    if (msgs.length) snoozing = msgs;
+  }
+
+  async function doSnooze(at) {
+    const msgs = snoozing;
+    snoozing = null;
+    const ids = msgs.map((m) => m.id);
+    for (const id of ids) dropFromList(id);
+    if (!(await act(() => api.snooze(ids, at)))) return refreshList();
+    new Set(msgs.map((m) => m.account_id)).forEach(refreshFolders);
+    refreshQueues();
+    flash(`Snoozed until ${when(at)}`, async () => {
+      await act(() => api.snooze(ids, null));
+      new Set(msgs.map((m) => m.account_id)).forEach(refreshFolders);
+      refreshQueues();
+      if (folder && !searching) refreshList();
+    });
+  }
+
+  async function unsnooze(m = selected) {
+    if (!m) return;
+    await act(() => api.snooze([m.id], null));
+    m.snoozed_until = null;
+    refreshQueues();
+    refreshFolders(m.account_id);
+    flash("Back in its folder");
+  }
+
+  async function scheduleFromCompose(accountId, mail, reopen, at) {
+    try {
+      await api.scheduleSend(accountId, at, mail, JSON.stringify(reopen));
+      if (reopen.draft_id) await api.deleteDraft(reopen.draft_id).catch(() => {});
+      composing = null;
+      refreshDrafts();
+      refreshQueues();
+      flash(`Scheduled for ${when(at)}`);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function editScheduled(x) {
+    if (!confirm("Stop this scheduled message and open it for editing?")) return;
+    try {
+      const draft = await api.unschedule(x.id);
+      composing = JSON.parse(draft);
+      refreshQueues();
+    } catch (e) {
+      error = String(e);
+    }
+  }
 
   async function refreshDrafts() {
     drafts = await api.drafts().catch(() => []);
@@ -114,6 +208,8 @@
     }
     await loadAccounts();
     refreshDrafts();
+    refreshQueues();
+    listen("scheduled-changed", refreshQueues);
 
     listen("sync-status", ({ payload }) => {
       syncing[payload.account_id] = payload.text;
@@ -138,6 +234,7 @@
       }
     });
     listen("mail-changed", async ({ payload }) => {
+      refreshQueues();
       accounts = await api.accounts();
       if (payload.account_id === accountId) {
         folders = await api.folders(accountId);
@@ -292,7 +389,11 @@
 
   /** A page of the current folder, or of every Inbox for the "All inboxes" view. */
   const fetchPage = (offset, limit) =>
-    folder.localDrafts
+    folder.snoozedView
+      ? offset ? Promise.resolve([]) : api.snoozed()
+      : folder.scheduledView
+      ? Promise.resolve(offset ? [] : scheduledRows())
+      : folder.localDrafts
       ? Promise.resolve(offset ? [] : draftRows())
       : folder.unified ? api.messagesByRole("inbox", offset, limit) : api.messages(folder.id, offset, limit);
 
@@ -425,6 +526,7 @@
   /** Ctrl/Cmd-click toggles a message in the selection; Shift-click selects a range. */
   function rowClick(event, m) {
     if (m.draft) return (composing = JSON.parse(m.draft.body));
+    if (m.scheduled) return editScheduled(m.scheduled);
     if (event.ctrlKey || event.metaKey) {
       selectedIds = selectedIds.includes(m.id) ? selectedIds.filter((x) => x !== m.id) : [...selectedIds, m.id];
       anchorId = m.id;
@@ -563,7 +665,7 @@
   }
 
   function onKey(event) {
-    if (showSettings || composing) return;
+    if (showSettings || composing || snoozing || moving) return;
     if (event.target instanceof HTMLInputElement) {
       if (event.key === "Escape") {
         event.target.blur();
@@ -589,6 +691,7 @@
       s: () => (multi ? bulkFlag("F", !selectedMsgs.every((m) => m.starred)) : toggleStar()),
       u: () => (multi ? bulkFlag("S", selectedMsgs.some((m) => m.unread)) : toggleRead()),
       v: () => openMove(),
+      b: () => openSnooze(),
       "/": () => searchInput?.focus(),
       c: () => compose(),
       r: () => reply(false),
@@ -710,6 +813,28 @@
           </div>
         </nav>
       {/if}
+      {#if snoozedList.length || scheduledList.length}
+        <nav class="accounts unified">
+          {#if snoozedList.length}
+            <div class="account" class:active={folder?.snoozedView}>
+              <button class="account-main" onclick={() => openQueue("snoozed")}>
+                <span class="all-icon"><Icon name="clock" size={15} /></span>
+                <span class="ellipsis">Snoozed</span>
+                <span class="count muted-count">{snoozedList.length}</span>
+              </button>
+            </div>
+          {/if}
+          {#if scheduledList.length}
+            <div class="account" class:active={folder?.scheduledView}>
+              <button class="account-main" onclick={() => openQueue("scheduled")}>
+                <span class="all-icon"><Icon name="send" size={15} /></span>
+                <span class="ellipsis">Scheduled</span>
+                <span class="count" class:muted-count={!scheduledList.some((x) => x.error)}>{scheduledList.length}</span>
+              </button>
+            </div>
+          {/if}
+        </nav>
+      {/if}
       <div class="section">Accounts</div>
       <nav class="accounts">
         {#each accounts as a (a.id)}
@@ -795,6 +920,9 @@
               {#if settings.density !== "compact"}
                 <div class="row-snippet ellipsis">{m.snippet}</div>
               {/if}
+              {#if m.snoozed_until}
+                <div class="row-folder snoozed-tag"><Icon name="clock" size={11} /> Back {when(m.snoozed_until)}</div>
+              {/if}
               {#if searching || folder?.unified}
                 {@const a = accounts.find((x) => x.id === m.account_id)}
                 <div class="row-folder">
@@ -847,6 +975,7 @@
               <button onclick={() => remove()}><Icon name="trash" size={16} /><span>Delete</span></button>
             {/if}
             <button onclick={openMove}><Icon name="folder" size={16} /><span>Move to…</span></button>
+            <button onclick={openSnooze}><Icon name="clock" size={16} /><span>Snooze</span></button>
             <button onclick={() => bulkFlag("S", true)}><Icon name="open" size={16} /><span>Mark read</span></button>
             <button onclick={() => bulkFlag("S", false)}><Icon name="mail" size={16} /><span>Mark unread</span></button>
             <button onclick={() => bulkFlag("F", !selectedMsgs.every((m) => m.starred))}><Icon name="star" size={16} /><span>{selectedMsgs.every((m) => m.starred) ? "Unstar" : "Star"}</span></button>
@@ -872,6 +1001,11 @@
             <button onclick={() => remove()} title="Delete (Del)"><Icon name="trash" size={16} /><span>Delete</span></button>
           {/if}
           <button class="secondary" onclick={openMove} title="Move to folder (v)"><Icon name="folder" size={16} /><span>Move</span></button>
+          {#if selected.snoozed_until}
+            <button class="secondary" onclick={() => unsnooze()} title="Bring it back now"><Icon name="clock" size={16} /><span>Unsnooze</span></button>
+          {:else}
+            <button class="secondary" onclick={openSnooze} title="Snooze (b)"><Icon name="clock" size={16} /><span>Snooze</span></button>
+          {/if}
           <span class="sep"></span>
           <button class="secondary" class:starred={selected.starred} onclick={() => toggleStar()} title="Star (s)">
             <Icon name="star" size={16} /><span>{selected.starred ? "Starred" : "Star"}</span>
@@ -947,7 +1081,13 @@
       {:else}
         <div class="placeholder">
           <Logo size={40} />
-          <p>{folder?.localDrafts ? "Click a draft to keep writing it." : "Select a message to read it."}</p>
+          <p>
+            {folder?.localDrafts
+              ? "Click a draft to keep writing it."
+              : folder?.scheduledView
+                ? "Click a scheduled message to change or cancel it."
+                : "Select a message to read it."}
+          </p>
         </div>
       {/if}
     </main>
@@ -965,6 +1105,10 @@
   />
 {/if}
 
+{#if snoozing}
+  <TimeMenu title={snoozing.length > 1 ? `Snooze ${snoozing.length} messages until…` : "Snooze until…"} onpick={doSnooze} onclose={() => (snoozing = null)} />
+{/if}
+
 {#if moving}
   <MovePicker
     accountId={moving.accountId}
@@ -980,6 +1124,7 @@
     draft={composing}
     accounts={liveAccounts}
     onsend={queueSend}
+    onschedule={scheduleFromCompose}
     onclose={(kept) => { composing = null; refreshDrafts(); if (kept) flash("Saved to Drafts"); }}
   />
 {/if}
@@ -1061,6 +1206,8 @@
   .account:hover { background: var(--hover); }
   .account.active { background: var(--selected); }
   .unified { padding-top: 10px; }
+  .unified + .unified { padding-top: 2px; }
+  .snoozed-tag { display: inline-flex; align-items: center; gap: 4px; background: color-mix(in srgb, var(--amber) 16%, transparent); color: var(--warn-text); }
   .muted-count { background: var(--hover); color: var(--muted); }
   .all-icon { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 30%; background: var(--accent-soft); color: var(--accent); flex-shrink: 0; }
   .acct-dot { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; vertical-align: 1px; }

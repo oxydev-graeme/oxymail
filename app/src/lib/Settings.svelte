@@ -37,6 +37,7 @@
     ["u", "Mark read or unread"],
     ["/", "Search"],
     ["v", "Move to folder"],
+    ["b", "Snooze"],
     ["Ctrl+A", "Select all loaded messages"],
     ["Ctrl / Shift + click", "Add to selection / select a range"],
     ["c, r, a, f", "New, reply, reply all, forward"],

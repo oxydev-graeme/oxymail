@@ -166,6 +166,33 @@ fn open_external(target: &str) -> Res<()> {
 }
 
 #[tauri::command]
+fn snooze(app: AppHandle, state: State<AppState>, ids: Vec<i64>, until: Option<i64>) -> Res<()> {
+    let store = state.0.lock().map_err(err)?;
+    store.snooze(&ids, until).map_err(err)?;
+    let _ = app.emit("scheduled-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn snoozed(state: State<AppState>) -> Res<Vec<MessageSummary>> {
+    state.0.lock().map_err(err)?.snoozed().map_err(err)
+}
+
+#[tauri::command]
+fn scheduled(state: State<AppState>) -> Res<Vec<oxymail_core::Scheduled>> {
+    state.0.lock().map_err(err)?.scheduled().map_err(err)
+}
+
+/// Cancels a scheduled message and returns its Compose state for editing.
+#[tauri::command]
+fn unschedule(state: State<AppState>, id: i64) -> Res<String> {
+    let store = state.0.lock().map_err(err)?;
+    let draft = store.scheduled().map_err(err)?.into_iter().find(|s| s.id == id).map(|s| s.draft).ok_or("already sent")?;
+    store.unschedule(id).map_err(err)?;
+    Ok(draft)
+}
+
+#[tauri::command]
 fn thread(state: State<AppState>, id: i64) -> Res<Vec<MessageSummary>> {
     state.0.lock().map_err(err)?.thread(id).map_err(err)
 }
@@ -233,6 +260,13 @@ fn main() {
             // Check every live account at start-up and then every few minutes.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                let ticker = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        live::tick(&ticker).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
+                });
                 loop {
                     live::sync_accounts(handle.clone(), None).await;
                     live::ensure_watchers(&handle);
@@ -272,6 +306,11 @@ fn main() {
             live::connect_archive,
             suggest_contacts,
             thread,
+            snooze,
+            snoozed,
+            scheduled,
+            unschedule,
+            live::schedule_send,
             save_draft,
             drafts,
             delete_draft,

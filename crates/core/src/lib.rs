@@ -61,6 +61,7 @@ create table if not exists messages (
     uid integer,
     from_archive integer not null default 0,
     thread_key text,
+    snoozed_until integer,
     unique (origin_folder_id, file)
 );
 create index if not exists messages_folder_date on messages(folder_id, deleted, date desc);
@@ -83,6 +84,15 @@ create table if not exists drafts (
     recipients text,
     body text not null,
     updated integer not null
+);
+create table if not exists scheduled (
+    id integer primary key,
+    account_id integer not null,
+    send_at integer not null,
+    mail text not null,
+    draft text not null,
+    summary text,
+    error text
 );
 create table if not exists settings (
     key text primary key,
@@ -204,6 +214,8 @@ pub struct Folder {
 #[derive(Debug, Serialize)]
 pub struct MessageSummary {
     pub id: i64,
+    /// Unix time a snoozed message comes back; `None` when not snoozed.
+    pub snoozed_until: Option<i64>,
     pub folder_id: i64,
     pub folder_name: String,
     pub folder_role: Option<String>,
@@ -251,6 +263,17 @@ pub struct MessageView {
     pub images_allowed: bool,
     /// Unsubscribe targets from List-Unsubscribe: https: and mailto: URLs.
     pub unsubscribe: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Scheduled {
+    pub id: i64,
+    pub account_id: i64,
+    pub send_at: i64,
+    pub mail: String,
+    pub draft: String,
+    pub summary: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -390,7 +413,7 @@ impl Store {
         let mut stmt = self.db.prepare(
             "select a.id, a.name, a.kind, a.label, a.sender_name, a.color, a.signature, a.icon,
                     (select count(*) from messages m join folders f on f.id = m.folder_id
-                     where f.account_id = a.id and m.deleted = 0 and instr(m.flags, 'S') = 0
+                     where f.account_id = a.id and m.deleted = 0 and m.snoozed_until is null and instr(m.flags, 'S') = 0
                        and coalesce(f.role, '') not in ('sent', 'drafts', 'spam', 'trash'))
              , a.archive_root is not null
              from accounts a where a.removed = 0 order by a.sort_index, a.name",
@@ -453,9 +476,9 @@ impl Store {
     pub fn folders(&self, account_id: i64) -> Result<Vec<Folder>> {
         let mut stmt = self.db.prepare(
             "select f.id, f.account_id, f.name, f.role,
-                    (select count(*) from messages m where m.folder_id = f.id and m.deleted = 0),
+                    (select count(*) from messages m where m.folder_id = f.id and m.deleted = 0 and m.snoozed_until is null),
                     (select count(*) from messages m
-                     where m.folder_id = f.id and m.deleted = 0 and instr(m.flags, 'S') = 0)
+                     where m.folder_id = f.id and m.deleted = 0 and m.snoozed_until is null and instr(m.flags, 'S') = 0)
              from folders f where f.account_id = ?1
              order by case f.role when 'inbox' then 0 when 'drafts' then 1 when 'sent' then 2
                       when 'archive' then 3 when 'spam' then 5 when 'trash' then 6 else 4 end, f.name",
@@ -475,7 +498,7 @@ impl Store {
 
     pub fn messages(&self, folder_id: i64, offset: i64, limit: i64) -> Result<Vec<MessageSummary>> {
         self.summaries(
-            "where m.folder_id = ?1 and m.deleted = 0 order by m.date desc limit ?2 offset ?3",
+            "where m.folder_id = ?1 and m.deleted = 0 and m.snoozed_until is null order by m.date desc limit ?2 offset ?3",
             params![folder_id, limit, offset],
         )
     }
@@ -514,7 +537,7 @@ impl Store {
     fn summaries(&self, tail: &str, params: impl rusqlite::Params) -> Result<Vec<MessageSummary>> {
         let sql = format!(
             "select m.id, m.folder_id, m.date, m.from_name, m.from_addr, m.subject, m.snippet, m.flags,
-                    m.attachments, f.name, f.role, f.account_id
+                    m.attachments, f.name, f.role, f.account_id, m.snoozed_until
              from messages m join folders f on f.id = m.folder_id
              join accounts a on a.id = f.account_id and a.removed = 0 {tail}"
         );
@@ -523,6 +546,7 @@ impl Store {
             let flags: String = r.get(7)?;
             Ok(MessageSummary {
                 id: r.get(0)?,
+                snoozed_until: r.get(12)?,
                 folder_id: r.get(1)?,
                 folder_name: r.get(9)?,
                 folder_role: r.get(10)?,
@@ -858,7 +882,7 @@ impl Store {
     /// Messages across every account's folders with this role (e.g. all Inboxes), newest first.
     pub fn messages_by_role(&self, role: &str, offset: i64, limit: i64) -> Result<Vec<MessageSummary>> {
         self.summaries(
-            "where f.role = ?1 and m.deleted = 0 order by m.date desc limit ?2 offset ?3",
+            "where f.role = ?1 and m.deleted = 0 and m.snoozed_until is null order by m.date desc limit ?2 offset ?3",
             params![role, limit, offset],
         )
     }
@@ -868,10 +892,73 @@ impl Store {
         Ok(self.db.query_row(
             "select count(*) from messages m join folders f on f.id = m.folder_id
              join accounts a on a.id = f.account_id and a.removed = 0
-             where f.role = ?1 and m.deleted = 0 and instr(m.flags, 'S') = 0",
+             where f.role = ?1 and m.deleted = 0 and m.snoozed_until is null and instr(m.flags, 'S') = 0",
             [role],
             |r| r.get(0),
         )?)
+    }
+
+    /// Hides messages until `until` (Unix time); `None` brings them back now.
+    pub fn snooze(&self, ids: &[i64], until: Option<i64>) -> Result<()> {
+        for id in ids {
+            self.db.execute("update messages set snoozed_until = ?1 where id = ?2", params![until, id])?;
+        }
+        Ok(())
+    }
+
+    /// Every snoozed message, soonest first.
+    pub fn snoozed(&self) -> Result<Vec<MessageSummary>> {
+        self.summaries("where m.snoozed_until is not null and m.deleted = 0 order by m.snoozed_until asc limit 500", [])
+    }
+
+    /// Brings back messages whose snooze has ended, marked unread. Returns them.
+    pub fn wake_snoozed(&mut self, now: i64) -> Result<Vec<MessageSummary>> {
+        let due = self.summaries(
+            "where m.snoozed_until is not null and m.snoozed_until <= ?1 and m.deleted = 0 order by m.date desc",
+            [now],
+        )?;
+        let ids: Vec<i64> = due.iter().map(|m| m.id).collect();
+        self.set_flag(&ids, 'S', false)?;
+        for id in &ids {
+            self.db.execute("update messages set snoozed_until = null where id = ?1", [id])?;
+        }
+        Ok(due)
+    }
+
+    /// Queues a message to send at `send_at`. `mail` is the outgoing message and `draft` the
+    /// Compose state (both JSON), so it can be reopened for editing.
+    pub fn schedule(&self, account_id: i64, send_at: i64, mail: &str, draft: &str, summary: &str) -> Result<i64> {
+        self.db.execute(
+            "insert into scheduled (account_id, send_at, mail, draft, summary) values (?1, ?2, ?3, ?4, ?5)",
+            params![account_id, send_at, mail, draft, summary],
+        )?;
+        Ok(self.db.last_insert_rowid())
+    }
+
+    pub fn scheduled(&self) -> Result<Vec<Scheduled>> {
+        let mut stmt = self.db.prepare("select id, account_id, send_at, mail, draft, summary, error from scheduled order by send_at")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Scheduled {
+                id: r.get(0)?,
+                account_id: r.get(1)?,
+                send_at: r.get(2)?,
+                mail: r.get(3)?,
+                draft: r.get(4)?,
+                summary: r.get(5)?,
+                error: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn unschedule(&self, id: i64) -> Result<()> {
+        self.db.execute("delete from scheduled where id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn set_schedule_error(&self, id: i64, error: Option<&str>) -> Result<()> {
+        self.db.execute("update scheduled set error = ?1 where id = ?2", params![error, id])?;
+        Ok(())
     }
 
     /// Saves an unsent message (the Compose state as JSON). Returns its id.
@@ -1040,7 +1127,12 @@ fn migrate(db: &Connection) -> Result<()> {
     add_missing_columns(
         db,
         "messages",
-        &[("uid", "integer"), ("from_archive", "integer not null default 0"), ("thread_key", "text")],
+        &[
+            ("uid", "integer"),
+            ("from_archive", "integer not null default 0"),
+            ("thread_key", "text"),
+            ("snoozed_until", "integer"),
+        ],
     )?;
     db.execute_batch("create index if not exists messages_thread on messages(thread_key)")?;
     add_missing_columns(db, "accounts", &[("archive_root", "text")])?;
@@ -1462,6 +1554,14 @@ mod tests {
         assert!(store.accounts()?.is_empty() && store.search("hello", 10)?.is_empty());
         store.import_archive(&dir.join("mail"), |_| {})?;
         assert_eq!(store.accounts()?[0].signature.as_deref(), Some("<b>Me</b>"), "re-import revives the account");
+
+        store.snooze(&[id], Some(100))?;
+        assert!(store.messages(store.search("hello", 1)?[0].folder_id, 0, 10)?.is_empty(), "snoozed is hidden");
+        assert_eq!(store.snoozed()?.len(), 1);
+        assert_eq!(store.wake_snoozed(50)?.len(), 0);
+        let woke = store.wake_snoozed(200)?;
+        assert_eq!(woke.len(), 1);
+        assert!(store.search("hello", 1)?[0].unread && store.snoozed()?.is_empty());
 
         store.set_setting("theme", "dark")?;
         assert_eq!(store.settings()?.get("theme").map(String::as_str), Some("dark"));

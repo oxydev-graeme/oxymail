@@ -3,6 +3,7 @@
   import { api, accountLabel, fileToBase64, formatSize } from "./api.js";
   import Icon from "./Icon.svelte";
   import RecipientInput from "./RecipientInput.svelte";
+  import TimeMenu from "./TimeMenu.svelte";
 
   /**
    * draft: { account_id, to, cc, bcc, subject, quote (HTML), html (whole body, when reopening),
@@ -11,7 +12,8 @@
    * onsend(accountId, mail, reopen): hands the message over; `reopen` is the draft to bring back
    * if the send is undone or fails.
    */
-  let { draft, accounts, onclose, onsend } = $props();
+  let { draft, accounts, onclose, onsend, onschedule } = $props();
+  let pickingTime = $state(false);
 
   // The draft is read once, when the window opens.
   const initial = untrack(() => ({ ...draft, account_id: draft.account_id ?? accounts[0]?.id }));
@@ -104,12 +106,12 @@
 
   const split = (s) => s.split(/[,;]\s*|\s+(?=[^\s]+@)/).map((x) => x.trim()).filter(Boolean);
 
-  async function send() {
+  /** Validates and builds the outgoing message; null (with an error shown) if not ready. */
+  function outgoing() {
     error = "";
-    if (!account) return (error = "Add a live account in Settings → Accounts to send mail.");
-    if (!split(to).length && !split(cc).length && !split(bcc).length) return (error = "Add at least one recipient.");
-    if (!subject.trim() && !confirm("Send without a subject?")) return;
-    const mail = {
+    if (!account) return (error = "Add a live account in Settings → Accounts to send mail."), null;
+    if (!split(to).length && !split(cc).length && !split(bcc).length) return (error = "Add at least one recipient."), null;
+    return {
       to: split(to),
       cc: split(cc),
       bcc: split(bcc),
@@ -122,6 +124,20 @@
       forward_from: forwarded.length ? initial.forward_from : null,
       forward_attachments: forwarded.map((a) => a.index),
     };
+  }
+
+  async function sendLater(at, when) {
+    pickingTime = false;
+    const mail = outgoing();
+    if (!mail) return;
+    clearTimeout(saveTimer);
+    onschedule(account.id, mail, { ...snapshot(), account_id: account.id }, at, when);
+  }
+
+  async function send() {
+    const mail = outgoing();
+    if (!mail) return;
+    if (!subject.trim() && !confirm("Send without a subject?")) return;
     clearTimeout(saveTimer);
     await saveDraft();
     const reopen = { ...snapshot(), account_id: account.id };
@@ -226,11 +242,16 @@
         <span class="grow"></span>
         <button class="ghost" onclick={discard} title="Delete this draft">Discard</button>
         <span class="muted">Ctrl+Enter</span>
+        <button class="ghost later" onclick={() => (pickingTime = true)} title="Choose when to send"><Icon name="clock" size={15} /> Send later</button>
         <button class="primary" onclick={send}>Send</button>
       </footer>
     {/if}
   </div>
 </div>
+
+{#if pickingTime}
+  <TimeMenu title="Send later" onpick={sendLater} onclose={() => (pickingTime = false)} />
+{/if}
 
 <style>
   .backdrop { position: fixed; inset: 0; display: grid; place-items: center; background: rgb(10 14 20 / 0.4); z-index: 25; }
@@ -281,6 +302,8 @@
   footer { display: flex; align-items: center; gap: 12px; padding: 10px 18px; border-top: 1px solid var(--border); }
   .ghost { padding: 7px 12px; border-radius: 8px; font-size: 13px; color: var(--muted); }
   .ghost:hover { background: var(--hover); color: var(--danger); }
+  .later { display: flex; align-items: center; gap: 6px; color: var(--text); border: 1px solid var(--border); }
+  .later:hover { color: var(--accent) !important; border-color: var(--accent); background: none !important; }
   .primary { padding: 8px 22px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; }
   .primary:disabled { opacity: 0.6; cursor: default; }
   .muted { color: var(--muted); font-size: 12px; }

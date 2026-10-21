@@ -7,11 +7,11 @@ use lettre::{Address, AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address as MailAddress;
 use mail_builder::headers::message_id::MessageId;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::autoconfig::{AccountConfig, Security};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct OutgoingAttachment {
     pub name: String,
     pub content_type: String,
@@ -19,7 +19,7 @@ pub struct OutgoingAttachment {
     pub data: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Outgoing {
     pub to: Vec<String>,
     #[serde(default)]
