@@ -1,7 +1,7 @@
 <script>
   import { onMount } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { api, DEFAULT_SETTINGS, shortDate, longDate, formatSize, messageDocument } from "./lib/api.js";
+  import { api, accountLabel, DEFAULT_SETTINGS, shortDate, longDate, formatSize, messageDocument } from "./lib/api.js";
   import Logo from "./lib/Logo.svelte";
   import Icon from "./lib/Icon.svelte";
   import Settings from "./lib/Settings.svelte";
@@ -55,6 +55,14 @@
   async function loadAccounts() {
     try {
       accounts = await api.accounts();
+      const ids = new Set(accounts.map((a) => a.id));
+      if (folder && !ids.has(folder.account_id)) {
+        folder = null;
+        list = [];
+        selectedId = null;
+        view = null;
+      }
+      for (const id of Object.keys(foldersByAccount)) if (!ids.has(Number(id))) delete foldersByAccount[id];
       if (accounts.length && folder === null) {
         await toggleAccount(accounts[0].id, true);
         const first = foldersByAccount[accounts[0].id]?.[0];
@@ -304,7 +312,8 @@
           <div class="account">
             <button class="account-name" onclick={() => toggleAccount(account.id)} title={account.name}>
               <span class="chevron" class:open={expanded[account.id]}>›</span>
-              <span class="ellipsis">{account.name}</span>
+              <span class="dot" style:background={account.color || "var(--faint)"}></span>
+              <span class="ellipsis">{accountLabel(account)}</span>
             </button>
             {#if expanded[account.id]}
               {#each foldersByAccount[account.id] ?? [] as f (f.id)}
@@ -441,6 +450,7 @@
     onchange={changeSetting}
     onclose={() => (showSettings = false)}
     onimported={loadAccounts}
+    onaccountschanged={loadAccounts}
   />
 {/if}
 
@@ -504,6 +514,7 @@
   .account-name:hover { background: var(--hover); }
   .chevron { display: inline-block; width: 10px; color: var(--muted); transition: transform 0.12s; }
   .chevron.open { transform: rotate(90deg); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .folder { display: flex; justify-content: space-between; gap: 8px; width: 100%; padding: 5px 8px 5px 26px; border-radius: 6px; font-size: 13px; text-align: left; color: var(--muted); }
   .folder:hover { background: var(--hover); color: var(--text); }
   .folder.active { background: var(--selected); color: var(--text); font-weight: 600; }

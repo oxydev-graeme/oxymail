@@ -16,7 +16,13 @@ export const api = {
   settings: () => invoke("settings"),
   setSetting: (key, value) => invoke("set_setting", { key, value }),
   dataLocation: () => invoke("data_location"),
+  reorderAccounts: (ids) => invoke("reorder_accounts", { ids }),
+  updateAccount: (id, update) => invoke("update_account", { id, update }),
+  removeAccount: (id) => invoke("remove_account", { id }),
 };
+
+/** Sidebar name for an account: its label, else its address. */
+export const accountLabel = (a) => a.label || a.name;
 
 export const DEFAULT_SETTINGS = {
   theme: "system",

@@ -3,8 +3,9 @@
   import { api } from "./api.js";
   import Icon from "./Icon.svelte";
   import Logo from "./Logo.svelte";
+  import AccountsSettings from "./AccountsSettings.svelte";
 
-  let { settings, accounts, onchange, onclose, onimported } = $props();
+  let { settings, accounts, onchange, onclose, onimported, onaccountschanged } = $props();
 
   let section = $state("appearance");
   let importPath = $state("~/MailbirdExport/mail");
@@ -20,6 +21,7 @@
     ["appearance", "Appearance"],
     ["reading", "Reading"],
     ["accounts", "Accounts"],
+    ["import", "Import"],
     ["shortcuts", "Shortcuts"],
     ["about", "About"],
   ];
@@ -104,25 +106,21 @@
           </p>
         </div>
       {:else if section === "accounts"}
-        <h2>Accounts</h2>
-        <ul class="accounts">
-          {#each accounts as account (account.id)}
-            <li><span>{account.name}</span><span class="badge">{account.kind === "archive" ? "Archive" : account.kind}</span></li>
-          {/each}
-        </ul>
-        <p class="hint">
-          Archive accounts are read from your Mailbird export. Starring, archiving and deleting only change
-          OxyMail's index; the message files on disk are never modified or removed.
-        </p>
+        <AccountsSettings {accounts} onchanged={onaccountschanged} />
+      {:else if section === "import"}
+        <h2>Import</h2>
         <div class="field">
-          <div class="label">Import another archive</div>
+          <div class="label">Import an archive</div>
           <div class="row">
             <input bind:value={importPath} />
             <button class="primary" onclick={runImport} disabled={importing}>
               {importing ? "Importing…" : "Import"}
             </button>
           </div>
-          <p class="hint">A folder laid out as account / folder / cur. Already-imported messages are skipped.</p>
+          <p class="hint">
+            A Maildir folder laid out as account / folder / cur, such as the Mailbird export. Messages already
+            imported are skipped, and a removed account comes back with its stars and folders.
+          </p>
           {#if importResult}<p class="result">{importResult}</p>{/if}
         </div>
         <div class="field">
@@ -210,10 +208,6 @@
   .segmented button.on { background: var(--panel); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); }
   .toggle { display: flex; gap: 10px; align-items: center; margin-bottom: 20px; font-size: 13px; cursor: pointer; }
   .toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
-  .accounts { list-style: none; margin: 0 0 8px; padding: 0; border: 1px solid var(--border); border-radius: 8px; }
-  .accounts li { display: flex; justify-content: space-between; padding: 7px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
-  .accounts li:last-child { border-bottom: 0; }
-  .badge { font-size: 11px; padding: 1px 8px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); }
   .row { display: flex; gap: 8px; }
   .row input { flex: 1; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
   .primary { padding: 7px 14px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; font-size: 13px; }

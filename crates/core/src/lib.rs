@@ -18,6 +18,12 @@ create table if not exists accounts (
     name text not null,
     kind text not null,
     root text not null,
+    label text,
+    sender_name text,
+    color text,
+    signature text,
+    sort_index integer not null default 0,
+    removed integer not null default 0,
     unique (kind, root)
 );
 create table if not exists folders (
@@ -55,7 +61,17 @@ create table if not exists settings (
 ";
 
 /// `PRAGMA user_version` for the current schema.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
+
+/// v3 added per-account settings. Applied to any accounts table that lacks them.
+const ACCOUNT_COLUMNS_V3: &[(&str, &str)] = &[
+    ("label", "text"),
+    ("sender_name", "text"),
+    ("color", "text"),
+    ("signature", "text"),
+    ("sort_index", "integer not null default 0"),
+    ("removed", "integer not null default 0"),
+];
 
 /// v1 had no `origin_folder_id`/`deleted`, and `unique (folder_id, file)`, which breaks as
 /// soon as a message moves. The table is rebuilt; ids are kept so the FTS rows still match.
@@ -93,8 +109,26 @@ const SNIPPET_CHARS: usize = 200;
 #[derive(Debug, Serialize)]
 pub struct Account {
     pub id: i64,
+    /// The mailbox address (or archive folder name); fixed.
     pub name: String,
     pub kind: String,
+    /// Optional label shown in the sidebar instead of the address.
+    pub label: Option<String>,
+    /// Name used in From when sending.
+    pub sender_name: Option<String>,
+    /// `#rrggbb` colour for the sidebar dot.
+    pub color: Option<String>,
+    /// HTML signature appended to new messages.
+    pub signature: Option<String>,
+}
+
+/// Editable account fields. `None` clears a field.
+#[derive(Debug, serde::Deserialize)]
+pub struct AccountUpdate {
+    pub label: Option<String>,
+    pub sender_name: Option<String>,
+    pub color: Option<String>,
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -191,7 +225,9 @@ impl Store {
             let account_name = file_name(&account_dir);
             let root_str = account_dir.to_string_lossy().to_string();
             tx.execute(
-                "insert or ignore into accounts (name, kind, root) values (?1, 'archive', ?2)",
+                "insert into accounts (name, kind, root, sort_index)
+                 values (?1, 'archive', ?2, (select coalesce(max(sort_index), -1) + 1 from accounts))
+                 on conflict (kind, root) do update set removed = 0",
                 params![account_name, root_str],
             )?;
             let account_id: i64 = tx.query_row(
@@ -276,14 +312,59 @@ impl Store {
                 }
             }
         }
+        apply_mailbird_metadata(&tx, root)?;
         tx.commit()?;
         Ok(stats)
     }
 
     pub fn accounts(&self) -> Result<Vec<Account>> {
-        let mut stmt = self.db.prepare("select id, name, kind from accounts order by name")?;
-        let rows = stmt.query_map([], |r| Ok(Account { id: r.get(0)?, name: r.get(1)?, kind: r.get(2)? }))?;
+        let mut stmt = self.db.prepare(
+            "select id, name, kind, label, sender_name, color, signature from accounts
+             where removed = 0 order by sort_index, name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Account {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                kind: r.get(2)?,
+                label: r.get(3)?,
+                sender_name: r.get(4)?,
+                color: r.get(5)?,
+                signature: r.get(6)?,
+            })
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Sets the sidebar order to the order of `ids`.
+    pub fn reorder_accounts(&mut self, ids: &[i64]) -> Result<()> {
+        let tx = self.db.transaction()?;
+        for (index, id) in ids.iter().enumerate() {
+            tx.execute("update accounts set sort_index = ?1 where id = ?2", params![index as i64, id])?;
+        }
+        tx.execute(
+            "insert into settings (key, value) values ('accounts_reordered', 'true')
+             on conflict (key) do update set value = excluded.value",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn update_account(&self, id: i64, update: &AccountUpdate) -> Result<()> {
+        let blank = |v: &Option<String>| v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+        self.db.execute(
+            "update accounts set label = ?1, sender_name = ?2, color = ?3, signature = ?4 where id = ?5",
+            params![blank(&update.label), blank(&update.sender_name), blank(&update.color), blank(&update.signature), id],
+        )?;
+        Ok(())
+    }
+
+    /// Removes an account from OxyMail. Its messages disappear from every view and search, but
+    /// nothing is deleted: importing the same archive again brings it back, stars and all.
+    pub fn remove_account(&self, id: i64) -> Result<()> {
+        self.db.execute("update accounts set removed = 1 where id = ?1", [id])?;
+        Ok(())
     }
 
     pub fn folders(&self, account_id: i64) -> Result<Vec<Folder>> {
@@ -333,7 +414,8 @@ impl Store {
         let sql = format!(
             "select m.id, m.folder_id, m.date, m.from_name, m.from_addr, m.subject, m.snippet, m.flags,
                     m.attachments, f.name, f.role, f.account_id
-             from messages m join folders f on f.id = m.folder_id {tail}"
+             from messages m join folders f on f.id = m.folder_id
+             join accounts a on a.id = f.account_id and a.removed = 0 {tail}"
         );
         let mut stmt = self.db.prepare(&sql)?;
         let rows = stmt.query_map(params, |r| {
@@ -552,6 +634,15 @@ fn migrate(db: &Connection) -> Result<()> {
         tx.commit()?;
     }
     db.execute_batch(SCHEMA)?;
+    let existing: Vec<String> = db
+        .prepare("select name from pragma_table_info('accounts')")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    for (column, decl) in ACCOUNT_COLUMNS_V3 {
+        if !existing.iter().any(|c| c == column) {
+            db.execute_batch(&format!("alter table accounts add column {column} {decl}"))?;
+        }
+    }
     db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -595,6 +686,55 @@ fn ensure_folder(db: &Connection, account_id: i64, role: &str) -> Result<i64> {
         params![account_id, name],
         |r| r.get(0),
     )?)
+}
+
+
+/// Copies account order, colour, sender name and signature from a Mailbird export's raw dump
+/// (`<root>/../raw/Accounts.jsonl` and `SenderIdentities.jsonl`), only into fields still empty.
+fn apply_mailbird_metadata(db: &Connection, root: &Path) -> Result<()> {
+    let Some(raw) = root.parent().map(|p| p.join("raw")) else { return Ok(()) };
+    let read = |name: &str| -> Vec<serde_json::Value> {
+        fs::read_to_string(raw.join(name))
+            .map(|text| text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect())
+            .unwrap_or_default()
+    };
+    let accounts = read("Accounts.jsonl");
+    if accounts.is_empty() {
+        return Ok(());
+    }
+    let identities = read("SenderIdentities.jsonl");
+    let text = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+    for account in &accounts {
+        let Some(username) = text(account, "Username") else { continue };
+        let mailbird_id = account.get("Id").and_then(|x| x.as_i64());
+        let identity = identities.iter().find(|i| i.get("AccountId").and_then(|x| x.as_i64()) == mailbird_id);
+        let root_str = root.join(&username).to_string_lossy().to_string();
+        db.execute(
+            "update accounts set
+                color = coalesce(color, ?1),
+                sender_name = coalesce(sender_name, ?2),
+                signature = coalesce(signature, ?3)
+             where kind = 'archive' and root = ?4",
+            params![
+                text(account, "ColorHex"),
+                identity.and_then(|i| text(i, "Name")).filter(|n| n != &username),
+                identity.and_then(|i| text(i, "Signature")),
+                root_str,
+            ],
+        )?;
+        // Mailbird's order only applies until the user reorders accounts themselves.
+        let reordered: bool = db
+            .query_row("select count(*) > 0 from settings where key = 'accounts_reordered'", [], |r| r.get(0))?;
+        if !reordered {
+            if let Some(index) = account.get("SortIndex").and_then(|x| x.as_i64()) {
+                db.execute(
+                    "update accounts set sort_index = ?1 where kind = 'archive' and root = ?2",
+                    params![index, root_str],
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -735,6 +875,16 @@ mod tests {
         // Re-importing must not duplicate a message that has moved.
         store.move_to_role(&[id], "archive")?;
         assert_eq!(store.import_archive(&dir.join("mail"), |_| {})?.added, 0);
+
+        let account = store.accounts()?[0].id;
+        store.update_account(account, &AccountUpdate {
+            label: Some("Me".into()), sender_name: None, color: Some("#0f5e73".into()), signature: Some("<b>Me</b>".into()),
+        })?;
+        assert_eq!(store.accounts()?[0].label.as_deref(), Some("Me"));
+        store.remove_account(account)?;
+        assert!(store.accounts()?.is_empty() && store.search("hello", 10)?.is_empty());
+        store.import_archive(&dir.join("mail"), |_| {})?;
+        assert_eq!(store.accounts()?[0].signature.as_deref(), Some("<b>Me</b>"), "re-import revives the account");
 
         store.set_setting("theme", "dark")?;
         assert_eq!(store.settings()?.get("theme").map(String::as_str), Some("dark"));

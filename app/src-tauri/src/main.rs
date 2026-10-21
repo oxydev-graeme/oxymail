@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use oxymail_core::{Account, Folder, ImportStats, MessageSummary, MessageView, Store};
+use oxymail_core::{Account, AccountUpdate, Folder, ImportStats, MessageSummary, MessageView, Store};
 use tauri::State;
 
 struct AppState(Mutex<Store>);
@@ -99,6 +99,21 @@ fn set_setting(state: State<AppState>, key: String, value: String) -> Res<()> {
 }
 
 #[tauri::command]
+fn reorder_accounts(state: State<AppState>, ids: Vec<i64>) -> Res<()> {
+    state.0.lock().map_err(err)?.reorder_accounts(&ids).map_err(err)
+}
+
+#[tauri::command]
+fn update_account(state: State<AppState>, id: i64, update: AccountUpdate) -> Res<()> {
+    state.0.lock().map_err(err)?.update_account(id, &update).map_err(err)
+}
+
+#[tauri::command]
+fn remove_account(state: State<AppState>, id: i64) -> Res<()> {
+    state.0.lock().map_err(err)?.remove_account(id).map_err(err)
+}
+
+#[tauri::command]
 fn data_location() -> String {
     Store::default_path().display().to_string()
 }
@@ -131,7 +146,10 @@ fn main() {
             restore,
             settings,
             set_setting,
-            data_location
+            data_location,
+            reorder_accounts,
+            update_account,
+            remove_account
         ])
         .run(tauri::generate_context!())
         .expect("running OxyMail");
