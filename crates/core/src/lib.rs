@@ -40,12 +40,50 @@ create table if not exists messages (
     flags text not null default '',
     attachments integer not null default 0,
     message_id text,
-    unique (folder_id, file)
+    origin_folder_id integer not null references folders(id),
+    deleted integer not null default 0,
+    unique (origin_folder_id, file)
 );
-create index if not exists messages_folder_date on messages(folder_id, date desc);
+create index if not exists messages_folder_date on messages(folder_id, deleted, date desc);
 create virtual table if not exists messages_fts using fts5(
     subject, sender, recipients, body, content=''
 );
+create table if not exists settings (
+    key text primary key,
+    value text not null
+);
+";
+
+/// `PRAGMA user_version` for the current schema.
+const SCHEMA_VERSION: i64 = 2;
+
+/// v1 had no `origin_folder_id`/`deleted`, and `unique (folder_id, file)`, which breaks as
+/// soon as a message moves. The table is rebuilt; ids are kept so the FTS rows still match.
+const MIGRATE_V1_TO_V2: &str = "
+create table messages_v2 (
+    id integer primary key,
+    folder_id integer not null references folders(id),
+    file text not null,
+    date integer not null,
+    from_name text,
+    from_addr text,
+    to_addrs text,
+    subject text,
+    snippet text,
+    flags text not null default '',
+    attachments integer not null default 0,
+    message_id text,
+    origin_folder_id integer not null references folders(id),
+    deleted integer not null default 0,
+    unique (origin_folder_id, file)
+);
+insert into messages_v2
+    select id, folder_id, file, date, from_name, from_addr, to_addrs, subject, snippet, flags,
+           attachments, message_id, folder_id, 0
+    from messages;
+drop table messages;
+alter table messages_v2 rename to messages;
+create index messages_folder_date on messages(folder_id, deleted, date desc);
 ";
 
 /// How much body text goes into the search index per message.
@@ -73,6 +111,9 @@ pub struct Folder {
 pub struct MessageSummary {
     pub id: i64,
     pub folder_id: i64,
+    pub folder_name: String,
+    pub folder_role: Option<String>,
+    pub account_id: i64,
     pub date: i64,
     pub from_name: Option<String>,
     pub from_addr: Option<String>,
@@ -126,8 +167,8 @@ impl Store {
         }
         let db = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         db.pragma_update(None, "journal_mode", "wal")?;
+        migrate(&db)?;
         db.pragma_update(None, "foreign_keys", "on")?;
-        db.execute_batch(SCHEMA)?;
         Ok(Self { db })
     }
 
@@ -177,7 +218,7 @@ impl Store {
                         let rel = format!("{sub}/{}", entry.file_name().to_string_lossy());
                         let exists: Option<i64> = tx
                             .query_row(
-                                "select id from messages where folder_id = ?1 and file = ?2",
+                                "select id from messages where origin_folder_id = ?1 and file = ?2",
                                 params![folder_id, rel],
                                 |r| r.get(0),
                             )
@@ -198,9 +239,9 @@ impl Store {
                         let from_name = from.and_then(|a| a.name()).map(str::to_string);
                         let from_addr = from.and_then(|a| a.address()).map(str::to_string);
                         tx.execute(
-                            "insert into messages (folder_id, file, date, from_name, from_addr, to_addrs,
-                                 subject, snippet, flags, attachments, message_id)
-                             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                            "insert into messages (folder_id, origin_folder_id, file, date, from_name,
+                                 from_addr, to_addrs, subject, snippet, flags, attachments, message_id)
+                             values (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                             params![
                                 folder_id,
                                 rel,
@@ -248,8 +289,9 @@ impl Store {
     pub fn folders(&self, account_id: i64) -> Result<Vec<Folder>> {
         let mut stmt = self.db.prepare(
             "select f.id, f.account_id, f.name, f.role,
-                    (select count(*) from messages m where m.folder_id = f.id),
-                    (select count(*) from messages m where m.folder_id = f.id and instr(m.flags, 'S') = 0)
+                    (select count(*) from messages m where m.folder_id = f.id and m.deleted = 0),
+                    (select count(*) from messages m
+                     where m.folder_id = f.id and m.deleted = 0 and instr(m.flags, 'S') = 0)
              from folders f where f.account_id = ?1
              order by case f.role when 'inbox' then 0 when 'drafts' then 1 when 'sent' then 2
                       when 'archive' then 3 when 'spam' then 5 when 'trash' then 6 else 4 end, f.name",
@@ -269,7 +311,7 @@ impl Store {
 
     pub fn messages(&self, folder_id: i64, offset: i64, limit: i64) -> Result<Vec<MessageSummary>> {
         self.summaries(
-            "where m.folder_id = ?1 order by m.date desc limit ?2 offset ?3",
+            "where m.folder_id = ?1 and m.deleted = 0 order by m.date desc limit ?2 offset ?3",
             params![folder_id, limit, offset],
         )
     }
@@ -282,7 +324,7 @@ impl Store {
         }
         self.summaries(
             "join (select rowid as hit, rank from messages_fts where messages_fts match ?1) s on s.hit = m.id
-             order by s.rank limit ?2",
+             where m.deleted = 0 order by s.rank limit ?2",
             params![fts, limit],
         )
     }
@@ -290,8 +332,8 @@ impl Store {
     fn summaries(&self, tail: &str, params: impl rusqlite::Params) -> Result<Vec<MessageSummary>> {
         let sql = format!(
             "select m.id, m.folder_id, m.date, m.from_name, m.from_addr, m.subject, m.snippet, m.flags,
-                    m.attachments
-             from messages m {tail}"
+                    m.attachments, f.name, f.role, f.account_id
+             from messages m join folders f on f.id = m.folder_id {tail}"
         );
         let mut stmt = self.db.prepare(&sql)?;
         let rows = stmt.query_map(params, |r| {
@@ -299,6 +341,9 @@ impl Store {
             Ok(MessageSummary {
                 id: r.get(0)?,
                 folder_id: r.get(1)?,
+                folder_name: r.get(9)?,
+                folder_role: r.get(10)?,
+                account_id: r.get(11)?,
                 date: r.get(2)?,
                 from_name: r.get(3)?,
                 from_addr: r.get(4)?,
@@ -315,7 +360,7 @@ impl Store {
     fn message_path(&self, id: i64) -> Result<PathBuf> {
         let (root, folder, file): (String, String, String) = self.db.query_row(
             "select a.root, f.name, m.file from messages m
-             join folders f on f.id = m.folder_id join accounts a on a.id = f.account_id
+             join folders f on f.id = m.origin_folder_id join accounts a on a.id = f.account_id
              where m.id = ?1",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -391,6 +436,165 @@ impl Store {
         let part = msg.attachments().nth(index).context("no such attachment")?;
         Ok((part.attachment_name().unwrap_or("attachment").to_string(), part.contents().to_vec()))
     }
+
+    /// Turns a Maildir flag on or off for each message. Only `S` (seen) and `F` (flagged/starred)
+    /// are user-settable. Archive messages change only in the index; their files are untouched.
+    pub fn set_flag(&mut self, ids: &[i64], flag: char, on: bool) -> Result<()> {
+        if !matches!(flag, 'S' | 'F') {
+            bail!("unsupported flag {flag}");
+        }
+        let tx = self.db.transaction()?;
+        for id in ids {
+            let flags: String = tx.query_row("select flags from messages where id = ?1", [id], |r| r.get(0))?;
+            let mut chars: Vec<char> = flags.chars().filter(|c| *c != flag).collect();
+            if on {
+                chars.push(flag);
+            }
+            chars.sort_unstable();
+            tx.execute("update messages set flags = ?1 where id = ?2", params![chars.iter().collect::<String>(), id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Moves messages to their account's folder with this role (`archive`, `trash`, `inbox`),
+    /// creating the folder if the account has none.
+    pub fn move_to_role(&mut self, ids: &[i64], role: &str) -> Result<()> {
+        let tx = self.db.transaction()?;
+        for id in ids {
+            let account_id = account_of(&tx, *id)?;
+            let target = ensure_folder(&tx, account_id, role)?;
+            tx.execute("update messages set folder_id = ?1 where id = ?2", params![target, id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Moves messages into a specific folder and un-hides them; used to undo a move or delete.
+    pub fn move_to_folder(&mut self, ids: &[i64], folder_id: i64) -> Result<()> {
+        let tx = self.db.transaction()?;
+        for id in ids {
+            tx.execute("update messages set folder_id = ?1, deleted = 0 where id = ?2", params![folder_id, id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Moves messages to Trash. Messages already in Trash are removed from OxyMail; for
+    /// archive accounts that only hides them, and the message file stays on disk.
+    pub fn delete(&mut self, ids: &[i64]) -> Result<()> {
+        let tx = self.db.transaction()?;
+        for id in ids {
+            let role: Option<String> = tx.query_row(
+                "select f.role from messages m join folders f on f.id = m.folder_id where m.id = ?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            if role.as_deref() == Some("trash") {
+                tx.execute("update messages set deleted = 1 where id = ?1", [id])?;
+            } else {
+                let target = ensure_folder(&tx, account_of(&tx, *id)?, "trash")?;
+                tx.execute("update messages set folder_id = ?1 where id = ?2", params![target, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Puts messages back in the folder they were imported from, or the Inbox if that was Trash.
+    pub fn restore(&mut self, ids: &[i64]) -> Result<()> {
+        let tx = self.db.transaction()?;
+        for id in ids {
+            let (origin, role): (i64, Option<String>) = tx.query_row(
+                "select m.origin_folder_id, f.role from messages m join folders f on f.id = m.origin_folder_id
+                 where m.id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let target = if role.as_deref() == Some("trash") {
+                ensure_folder(&tx, account_of(&tx, *id)?, "inbox")?
+            } else {
+                origin
+            };
+            tx.execute("update messages set folder_id = ?1, deleted = 0 where id = ?2", params![target, id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn settings(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        let mut stmt = self.db.prepare("select key, value from settings")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.db.execute(
+            "insert into settings (key, value) values (?1, ?2)
+             on conflict (key) do update set value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+}
+
+
+fn migrate(db: &Connection) -> Result<()> {
+    let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let has_messages: bool = db.query_row(
+        "select count(*) > 0 from sqlite_master where type = 'table' and name = 'messages'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_messages && version < 2 {
+        let tx = db.unchecked_transaction()?;
+        tx.execute_batch(MIGRATE_V1_TO_V2)?;
+        tx.commit()?;
+    }
+    db.execute_batch(SCHEMA)?;
+    db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+fn account_of(db: &Connection, message_id: i64) -> Result<i64> {
+    Ok(db.query_row(
+        "select f.account_id from messages m join folders f on f.id = m.folder_id where m.id = ?1",
+        [message_id],
+        |r| r.get(0),
+    )?)
+}
+
+/// Finds the account's folder with `role`, creating it (named after the role) if missing.
+fn ensure_folder(db: &Connection, account_id: i64, role: &str) -> Result<i64> {
+    let existing: Option<i64> = db
+        .query_row(
+            "select id from folders where account_id = ?1 and role = ?2 order by id limit 1",
+            params![account_id, role],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    let name = match role {
+        "inbox" => "Inbox",
+        "archive" => "Archive",
+        "trash" => "Trash",
+        "spam" => "Spam",
+        "sent" => "Sent",
+        "drafts" => "Drafts",
+        _ => bail!("unknown folder role {role}"),
+    };
+    db.execute(
+        "insert into folders (account_id, name, role) values (?1, ?2, ?3)
+         on conflict (account_id, name) do update set role = excluded.role",
+        params![account_id, name, role],
+    )?;
+    Ok(db.query_row(
+        "select id from folders where account_id = ?1 and name = ?2",
+        params![account_id, name],
+        |r| r.get(0),
+    )?)
 }
 
 fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -498,5 +702,43 @@ mod tests {
     #[test]
     fn truncate_respects_char_boundaries() {
         assert_eq!(truncate("héllo", 2), "hé");
+    }
+
+    #[test]
+    fn actions_change_the_index_only() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("oxymail-test-{}", std::process::id()));
+        let inbox = dir.join("mail/me@example.com/Inbox/cur");
+        fs::create_dir_all(&inbox)?;
+        let file = inbox.join("1.M1.oxymail:2,S");
+        fs::write(&file, "From: A <a@example.com>\r\nSubject: Hi\r\nDate: Tue, 1 Jul 2025 10:00:00 +0000\r\n\r\nHello\r\n")?;
+        let mut store = Store::open(&dir.join("test.db"))?;
+        store.import_archive(&dir.join("mail"), |_| {})?;
+        let id = store.search("hello", 10)?[0].id;
+
+        store.set_flag(&[id], 'F', true)?;
+        store.set_flag(&[id], 'S', false)?;
+        let m = &store.search("hello", 10)?[0];
+        assert!(m.starred && m.unread);
+
+        store.move_to_role(&[id], "archive")?;
+        assert_eq!(store.search("hello", 10)?[0].folder_role.as_deref(), Some("archive"));
+
+        store.delete(&[id])?;
+        assert_eq!(store.search("hello", 10)?[0].folder_role.as_deref(), Some("trash"));
+        store.delete(&[id])?;
+        assert!(store.search("hello", 10)?.is_empty());
+
+        store.restore(&[id])?;
+        assert_eq!(store.search("hello", 10)?[0].folder_name, "Inbox");
+        assert!(file.exists(), "archive file must never be touched");
+
+        // Re-importing must not duplicate a message that has moved.
+        store.move_to_role(&[id], "archive")?;
+        assert_eq!(store.import_archive(&dir.join("mail"), |_| {})?.added, 0);
+
+        store.set_setting("theme", "dark")?;
+        assert_eq!(store.settings()?.get("theme").map(String::as_str), Some("dark"));
+        fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 }

@@ -11,7 +11,15 @@
   },
   "app": {
     "windows": [
-      { "label": "main", "title": "OxyMail", "width": 1360, "height": 860, "minWidth": 900, "minHeight": 560 }
+      {
+        "label": "main",
+        "title": "OxyMail",
+        "width": 1360,
+        "height": 860,
+        "minWidth": 900,
+        "minHeight": 560,
+        "decorations": false
+      }
     ],
     "security": {
       "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-src 'self' data: about:"
@@ -19,9 +27,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "appimage"],
+    "targets": [
+      "deb",
+      "appimage"
+    ],
     "category": "Office",
     "shortDescription": "Email client",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"]
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ]
   }
 }

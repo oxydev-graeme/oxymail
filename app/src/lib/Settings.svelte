@@ -1,0 +1,236 @@
+<script>
+  import { onMount } from "svelte";
+  import { api } from "./api.js";
+  import Icon from "./Icon.svelte";
+  import Logo from "./Logo.svelte";
+
+  let { settings, accounts, onchange, onclose, onimported } = $props();
+
+  let section = $state("appearance");
+  let importPath = $state("~/MailbirdExport/mail");
+  let importing = $state(false);
+  let importResult = $state("");
+  let dataPath = $state("");
+
+  onMount(async () => {
+    dataPath = await api.dataLocation();
+  });
+
+  const sections = [
+    ["appearance", "Appearance"],
+    ["reading", "Reading"],
+    ["accounts", "Accounts"],
+    ["shortcuts", "Shortcuts"],
+    ["about", "About"],
+  ];
+
+  const shortcuts = [
+    ["↓ / j", "Next message"],
+    ["↑ / k", "Previous message"],
+    ["e", "Archive"],
+    ["Delete / #", "Delete (move to Trash)"],
+    ["s", "Star or unstar"],
+    ["u", "Mark read or unread"],
+    ["/", "Search"],
+    ["Esc", "Clear search or close this panel"],
+  ];
+
+  async function runImport() {
+    importing = true;
+    importResult = "";
+    try {
+      const stats = await api.importArchive(importPath);
+      importResult = `Added ${stats.added.toLocaleString()} messages (${stats.skipped.toLocaleString()} already imported).`;
+      onimported();
+    } catch (e) {
+      importResult = `Import failed: ${e}`;
+    } finally {
+      importing = false;
+    }
+  }
+
+  function onKey(event) {
+    if (event.key === "Escape") onclose();
+  }
+</script>
+
+<svelte:window onkeydown={onKey} />
+
+<div class="backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && onclose()}>
+  <div class="dialog" role="dialog" aria-label="Settings">
+    <nav>
+      <div class="title">Settings</div>
+      {#each sections as [id, label]}
+        <button class:active={section === id} onclick={() => (section = id)}>{label}</button>
+      {/each}
+    </nav>
+    <div class="content">
+      <button class="close" onclick={onclose} title="Close"><Icon name="x" /></button>
+
+      {#if section === "appearance"}
+        <h2>Appearance</h2>
+        <div class="field">
+          <div class="label">Theme</div>
+          <div class="segmented">
+            {#each [["system", "System"], ["light", "Light"], ["dark", "Dark"]] as [value, label]}
+              <button class:on={settings.theme === value} onclick={() => onchange("theme", value)}>{label}</button>
+            {/each}
+          </div>
+        </div>
+        <div class="field">
+          <div class="label">Message list</div>
+          <div class="segmented">
+            {#each [["comfortable", "Comfortable"], ["compact", "Compact"]] as [value, label]}
+              <button class:on={settings.density === value} onclick={() => onchange("density", value)}>{label}</button>
+            {/each}
+          </div>
+          <p class="hint">Compact hides the preview line and fits more messages on screen.</p>
+        </div>
+      {:else if section === "reading"}
+        <h2>Reading</h2>
+        <label class="toggle">
+          <input
+            type="checkbox"
+            checked={settings.mark_read_on_open === "true"}
+            onchange={(e) => onchange("mark_read_on_open", String(e.currentTarget.checked))}
+          />
+          <span>Mark messages as read when opened</span>
+        </label>
+        <div class="field">
+          <div class="label">Remote content</div>
+          <p class="hint">
+            Remote images, fonts and scripts are always blocked, so senders can't tell when you read their
+            email. Images included in the message itself still show.
+          </p>
+        </div>
+      {:else if section === "accounts"}
+        <h2>Accounts</h2>
+        <ul class="accounts">
+          {#each accounts as account (account.id)}
+            <li><span>{account.name}</span><span class="badge">{account.kind === "archive" ? "Archive" : account.kind}</span></li>
+          {/each}
+        </ul>
+        <p class="hint">
+          Archive accounts are read from your Mailbird export. Starring, archiving and deleting only change
+          OxyMail's index; the message files on disk are never modified or removed.
+        </p>
+        <div class="field">
+          <div class="label">Import another archive</div>
+          <div class="row">
+            <input bind:value={importPath} />
+            <button class="primary" onclick={runImport} disabled={importing}>
+              {importing ? "Importing…" : "Import"}
+            </button>
+          </div>
+          <p class="hint">A folder laid out as account / folder / cur. Already-imported messages are skipped.</p>
+          {#if importResult}<p class="result">{importResult}</p>{/if}
+        </div>
+        <div class="field">
+          <div class="label">Index location</div>
+          <code>{dataPath}</code>
+        </div>
+        <p class="hint">Live IMAP, Gmail and Outlook accounts arrive in the next stage.</p>
+      {:else if section === "shortcuts"}
+        <h2>Keyboard shortcuts</h2>
+        <table>
+          <tbody>
+            {#each shortcuts as [keys, action]}
+              <tr><td><kbd>{keys}</kbd></td><td>{action}</td></tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else}
+        <div class="about">
+          <Logo size={56} />
+          <div class="wordmark"><b>Oxy</b>Mail</div>
+          <p class="tagline">Email with room to breathe.</p>
+          <p class="hint">Version 0.1.0 · GPL-3.0</p>
+          <p class="hint">github.com/oxydev-graeme/oxymail</p>
+        </div>
+      {/if}
+    </div>
+  </div>
+</div>
+
+<style>
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgb(10 14 20 / 0.45);
+    z-index: 20;
+  }
+  .dialog {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    width: min(760px, 92vw);
+    height: min(540px, 86vh);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 20px 60px rgb(0 0 0 / 0.3);
+    overflow: hidden;
+  }
+  nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 16px 10px;
+    background: var(--sidebar);
+    border-right: 1px solid var(--border);
+  }
+  .title { padding: 0 10px 10px; font-weight: 700; }
+  nav button {
+    padding: 7px 10px;
+    border-radius: 6px;
+    text-align: left;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  nav button:hover { background: var(--border); color: var(--text); }
+  nav button.active { background: var(--selected); color: var(--text); font-weight: 600; }
+  .content { position: relative; padding: 22px 28px; overflow-y: auto; }
+  .close { position: absolute; top: 14px; right: 14px; padding: 4px; border-radius: 6px; color: var(--muted); }
+  .close:hover { background: var(--bg); color: var(--text); }
+  h2 { margin: 0 0 18px; font-size: 17px; }
+  .field { margin-bottom: 20px; }
+  .label { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+  .hint { margin: 6px 0 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .result { font-size: 13px; margin: 8px 0 0; }
+  .segmented {
+    display: inline-flex;
+    padding: 3px;
+    gap: 2px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .segmented button { padding: 5px 14px; border-radius: 6px; font-size: 13px; color: var(--muted); }
+  .segmented button.on { background: var(--panel); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); }
+  .toggle { display: flex; gap: 10px; align-items: center; margin-bottom: 20px; font-size: 13px; cursor: pointer; }
+  .toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
+  .accounts { list-style: none; margin: 0 0 8px; padding: 0; border: 1px solid var(--border); border-radius: 8px; }
+  .accounts li { display: flex; justify-content: space-between; padding: 7px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
+  .accounts li:last-child { border-bottom: 0; }
+  .badge { font-size: 11px; padding: 1px 8px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); }
+  .row { display: flex; gap: 8px; }
+  .row input { flex: 1; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+  .primary { padding: 7px 14px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; font-size: 13px; }
+  .primary:disabled { opacity: 0.6; }
+  code { font-size: 12px; color: var(--muted); word-break: break-all; }
+  table { border-collapse: collapse; font-size: 13px; }
+  td { padding: 6px 16px 6px 0; }
+  kbd {
+    padding: 2px 7px;
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    background: var(--bg);
+    font: 12px ui-monospace, monospace;
+  }
+  .about { display: grid; justify-items: center; text-align: center; padding-top: 40px; }
+  .wordmark { margin-top: 12px; font-size: 26px; letter-spacing: -0.03em; font-weight: 450; }
+  .wordmark b { font-weight: 800; }
+  .tagline { margin: 4px 0 18px; color: var(--muted); }
+</style>

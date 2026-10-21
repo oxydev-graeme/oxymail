@@ -1,36 +1,69 @@
+/* OxyMail brand: Oxy Deep #0F5E73, Oxy Air #0E7490 / #3BB7D1, family Amber #FE9A00. */
 :root {
-  --bg: #f6f7f9;
+  --brand: #0f5e73;
+  --amber: #fe9a00;
+  --header: #f9fbfc;
+  --bg: #f4f7f8;
   --panel: #ffffff;
-  --sidebar: #eef0f4;
-  --text: #1d2433;
-  --muted: #69708a;
-  --faint: #9aa0b4;
-  --border: #e1e4ea;
-  --accent: #2f6fed;
-  --accent-soft: #e6eeff;
-  --selected: #dfe8fd;
-  --warn-bg: #fff6e0;
-  --warn-text: #7a5600;
+  --sidebar: #eef3f5;
+  --text: #17202b;
+  --muted: #5f6b7a;
+  --faint: #95a0ad;
+  --border: #dfe6ea;
+  --accent: #0e7490;
+  --accent-soft: #e0f1f5;
+  --selected: #d9edf2;
+  --hover: #e6eef1;
+  --warn-bg: #fff4dc;
+  --warn-text: #7a5000;
+  --star: #e89200;
+  --danger: #c0352b;
   --radius: 8px;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #15171c;
-    --panel: #1b1e24;
-    --sidebar: #121418;
-    --text: #e4e7ee;
-    --muted: #9aa1b5;
-    --faint: #6b7287;
-    --border: #2a2e37;
-    --accent: #6c9bff;
-    --accent-soft: #23314f;
-    --selected: #24345a;
-    --warn-bg: #3a2f12;
-    --warn-text: #f1cf7a;
+  :root:not([data-theme="light"]) {
+    --brand: #3bb7d1;
+    --header: #101418;
+    --bg: #12161b;
+    --panel: #171c22;
+    --sidebar: #0f1317;
+    --text: #e3e9ee;
+    --muted: #96a3b0;
+    --faint: #66727f;
+    --border: #262e37;
+    --accent: #3bb7d1;
+    --accent-soft: #15323b;
+    --selected: #173842;
+    --hover: #1d252d;
+    --warn-bg: #3a2c0f;
+    --warn-text: #f3cf7c;
+    --star: #ffb020;
+    --danger: #ff6b5e;
     color-scheme: dark;
   }
+}
+
+:root[data-theme="dark"] {
+  --brand: #3bb7d1;
+  --header: #101418;
+  --bg: #12161b;
+  --panel: #171c22;
+  --sidebar: #0f1317;
+  --text: #e3e9ee;
+  --muted: #96a3b0;
+  --faint: #66727f;
+  --border: #262e37;
+  --accent: #3bb7d1;
+  --accent-soft: #15323b;
+  --selected: #173842;
+  --hover: #1d252d;
+  --warn-bg: #3a2c0f;
+  --warn-text: #f3cf7c;
+  --star: #ffb020;
+  --danger: #ff6b5e;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -42,6 +75,7 @@ body {
   color: var(--text);
   background: var(--bg);
   overflow: hidden;
+  user-select: none;
 }
 
 button {
@@ -55,4 +89,5 @@ button {
 input {
   font: inherit;
   color: inherit;
+  user-select: text;
 }

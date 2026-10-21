@@ -1,14 +1,21 @@
 <script>
   import { onMount } from "svelte";
-  import { api, shortDate, longDate, formatSize, messageDocument } from "./lib/api.js";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { api, DEFAULT_SETTINGS, shortDate, longDate, formatSize, messageDocument } from "./lib/api.js";
+  import Logo from "./lib/Logo.svelte";
+  import Icon from "./lib/Icon.svelte";
+  import Settings from "./lib/Settings.svelte";
 
   const PAGE = 200;
+  const appWindow = getCurrentWindow();
+
+  let settings = $state({ ...DEFAULT_SETTINGS });
+  let showSettings = $state(false);
 
   let accounts = $state([]);
   let foldersByAccount = $state({});
   let expanded = $state({});
-  let folderId = $state(null);
-  let folderName = $state("");
+  let folder = $state(null);
 
   let list = $state([]);
   let listDone = $state(false);
@@ -18,21 +25,40 @@
 
   let query = $state("");
   let searching = $state(false);
+  let searchInput;
 
   let importPath = $state("~/MailbirdExport/mail");
   let importing = $state(false);
-  let toast = $state("");
+  let toast = $state(null);
+  let toastTimer;
   let error = $state("");
 
-  onMount(loadAccounts);
+  let selected = $derived(list.find((m) => m.id === selectedId) ?? null);
+  /** Role of the folder the selected message is in (search results can span folders). */
+  let selectedRole = $derived(selected?.folder_role ?? null);
+
+  $effect(() => {
+    const root = document.documentElement;
+    if (settings.theme === "system") delete root.dataset.theme;
+    else root.dataset.theme = settings.theme;
+  });
+
+  onMount(async () => {
+    try {
+      settings = { ...DEFAULT_SETTINGS, ...(await api.settings()) };
+    } catch (e) {
+      error = String(e);
+    }
+    await loadAccounts();
+  });
 
   async function loadAccounts() {
     try {
       accounts = await api.accounts();
-      if (accounts.length && folderId === null) {
+      if (accounts.length && folder === null) {
         await toggleAccount(accounts[0].id, true);
-        const inbox = foldersByAccount[accounts[0].id]?.[0];
-        if (inbox) openFolder(inbox);
+        const first = foldersByAccount[accounts[0].id]?.[0];
+        if (first) openFolder(first);
       }
     } catch (e) {
       error = String(e);
@@ -41,26 +67,29 @@
 
   async function toggleAccount(id, open = !expanded[id]) {
     expanded[id] = open;
-    if (open && !foldersByAccount[id]) {
-      foldersByAccount[id] = await api.folders(id);
-    }
+    if (open && !foldersByAccount[id]) await refreshFolders(id);
   }
 
-  async function openFolder(folder) {
-    folderId = folder.id;
-    folderName = folder.name;
+  async function refreshFolders(accountId) {
+    foldersByAccount[accountId] = await api.folders(accountId);
+  }
+
+  async function openFolder(f) {
+    folder = f;
     query = "";
     searching = false;
     list = [];
     listDone = false;
+    selectedId = null;
+    view = null;
     await loadMore();
   }
 
   async function loadMore() {
-    if (loadingList || listDone || searching || folderId === null) return;
+    if (loadingList || listDone || searching || !folder) return;
     loadingList = true;
     try {
-      const page = await api.messages(folderId, list.length, PAGE);
+      const page = await api.messages(folder.id, list.length, PAGE);
       list = [...list, ...page];
       listDone = page.length < PAGE;
     } catch (e) {
@@ -72,10 +101,7 @@
 
   async function runSearch(event) {
     event.preventDefault();
-    if (!query.trim()) {
-      clearSearch();
-      return;
-    }
+    if (!query.trim()) return clearSearch();
     searching = true;
     loadingList = true;
     try {
@@ -90,7 +116,6 @@
 
   function clearSearch() {
     query = "";
-    const folder = Object.values(foldersByAccount).flat().find((f) => f.id === folderId);
     if (folder) openFolder(folder);
   }
 
@@ -98,10 +123,94 @@
     selectedId = id;
     try {
       view = await api.message(id);
+      const m = list.find((x) => x.id === id);
+      if (m?.unread && settings.mark_read_on_open === "true") {
+        await api.setFlag([id], "S", true);
+        m.unread = false;
+        refreshFolders(m.account_id);
+      }
     } catch (e) {
       view = null;
       error = String(e);
     }
+  }
+
+  // ---- Actions -------------------------------------------------------------
+
+  async function toggleStar(m = selected) {
+    if (!m) return;
+    await act(() => api.setFlag([m.id], "F", !m.starred));
+    m.starred = !m.starred;
+  }
+
+  async function toggleRead(m = selected) {
+    if (!m) return;
+    await act(() => api.setFlag([m.id], "S", m.unread));
+    m.unread = !m.unread;
+    refreshFolders(m.account_id);
+  }
+
+  /** Runs a move-style action, takes the message out of the list and offers Undo. */
+  async function moveAway(m, action, label) {
+    if (!m) return;
+    const from = m.folder_id;
+    const ok = await act(action);
+    if (!ok) return;
+    dropFromList(m.id);
+    refreshFolders(m.account_id);
+    flash(label, async () => {
+      await act(() => api.moveToFolder([m.id], from));
+      refreshFolders(m.account_id);
+      if (folder?.id === from && !searching) openFolder(folder);
+    });
+  }
+
+  const archive = (m = selected) => moveAway(m, () => api.moveTo([m.id], "archive"), "Archived");
+  const moveToInbox = (m = selected) => moveAway(m, () => api.moveTo([m.id], "inbox"), "Moved to Inbox");
+  const restore = (m = selected) => moveAway(m, () => api.restore([m.id]), "Restored");
+
+  function remove(m = selected) {
+    if (!m) return;
+    if (m.folder_role === "trash") {
+      const ok = confirm(
+        "Remove this message from OxyMail?\n\nIt disappears from every folder and search. " +
+          "For archive accounts the original file in your export is kept.",
+      );
+      if (!ok) return;
+      return moveAway(m, () => api.remove([m.id]), "Removed from OxyMail");
+    }
+    return moveAway(m, () => api.remove([m.id]), "Moved to Trash");
+  }
+
+  async function act(fn) {
+    try {
+      await fn();
+      return true;
+    } catch (e) {
+      error = String(e);
+      return false;
+    }
+  }
+
+  function dropFromList(id) {
+    const i = list.findIndex((m) => m.id === id);
+    if (i < 0) return;
+    list = list.filter((m) => m.id !== id);
+    if (selectedId === id) {
+      const next = list[i] ?? list[i - 1];
+      if (next) select(next.id);
+      else {
+        selectedId = null;
+        view = null;
+      }
+    }
+  }
+
+  // ---- Settings, keys, toasts ---------------------------------------------
+
+  async function changeSetting(key, value) {
+    settings[key] = value;
+    await act(() => api.setSetting(key, value));
   }
 
   function onListScroll(event) {
@@ -110,26 +219,40 @@
   }
 
   function onKey(event) {
-    if (event.target instanceof HTMLInputElement || !list.length) return;
+    if (showSettings) return;
+    if (event.target instanceof HTMLInputElement) {
+      if (event.key === "Escape") {
+        event.target.blur();
+        if (searching) clearSearch();
+      }
+      return;
+    }
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
     const i = list.findIndex((m) => m.id === selectedId);
-    if (event.key === "ArrowDown" || event.key === "j") {
+    const keys = {
+      ArrowDown: () => list[Math.min(i + 1, list.length - 1)] && select(list[Math.min(i + 1, list.length - 1)].id),
+      j: () => keys.ArrowDown(),
+      ArrowUp: () => list[Math.max(i - 1, 0)] && select(list[Math.max(i - 1, 0)].id),
+      k: () => keys.ArrowUp(),
+      e: () => (selectedRole === "archive" ? moveToInbox() : archive()),
+      Delete: () => remove(),
+      "#": () => remove(),
+      s: () => toggleStar(),
+      u: () => toggleRead(),
+      "/": () => searchInput?.focus(),
+      Escape: () => searching && clearSearch(),
+    };
+    const fn = keys[event.key];
+    if (fn) {
       event.preventDefault();
-      const next = list[Math.min(i + 1, list.length - 1)];
-      if (next) select(next.id);
-    } else if (event.key === "ArrowUp" || event.key === "k") {
-      event.preventDefault();
-      const prev = list[Math.max(i - 1, 0)];
-      if (prev) select(prev.id);
+      fn();
     }
   }
 
-  async function save(index) {
-    try {
-      const path = await api.saveAttachment(view.id, index);
-      flash(`Saved to ${path}`);
-    } catch (e) {
-      error = String(e);
-    }
+  function flash(message, undo = null) {
+    clearTimeout(toastTimer);
+    toast = { message, undo };
+    toastTimer = setTimeout(() => (toast = null), 6000);
   }
 
   async function runImport() {
@@ -145,299 +268,315 @@
     }
   }
 
-  function flash(message) {
-    toast = message;
-    setTimeout(() => (toast = ""), 4000);
-  }
-
-  function sender(m) {
-    return m.from_name || m.from_addr || "(no sender)";
-  }
+  const sender = (m) => m.from_name || m.from_addr || "(no sender)";
+  const showUnread = (f) => f.unread > 0 && !["sent", "trash", "spam", "drafts"].includes(f.role);
 </script>
 
 <svelte:window onkeydown={onKey} />
 
-<div class="shell">
-  <aside class="sidebar">
-    <div class="brand">OxyMail</div>
-    <nav>
-      {#each accounts as account (account.id)}
-        <div class="account">
-          <button class="account-name" onclick={() => toggleAccount(account.id)} title={account.name}>
-            <span class="chevron" class:open={expanded[account.id]}>›</span>
-            <span class="ellipsis">{account.name}</span>
-          </button>
-          {#if expanded[account.id]}
-            {#each foldersByAccount[account.id] ?? [] as folder (folder.id)}
-              <button
-                class="folder"
-                class:active={folder.id === folderId && !searching}
-                onclick={() => openFolder(folder)}
-              >
-                <span class="ellipsis">{folder.name}</span>
-                {#if folder.unread > 0 && folder.role !== "sent" && folder.role !== "trash" && folder.role !== "spam"}
-                  <span class="count">{folder.unread.toLocaleString()}</span>
-                {/if}
-              </button>
-            {/each}
-          {/if}
-        </div>
-      {/each}
-    </nav>
-    {#if accounts.length}
-      <div class="sidebar-foot">Archive · read-only</div>
-    {/if}
-  </aside>
-
-  <section class="list-pane">
+<div class="app" class:compact={settings.density === "compact"}>
+  <header class="titlebar" data-tauri-drag-region>
+    <div class="brand" data-tauri-drag-region>
+      <Logo size={24} />
+      <span class="wordmark"><b>Oxy</b>Mail</span>
+    </div>
     <form class="search" onsubmit={runSearch}>
-      <input type="search" placeholder="Search all mail" bind:value={query} />
+      <Icon name="search" size={15} />
+      <input bind:this={searchInput} type="search" placeholder="Search all mail" bind:value={query} />
       {#if searching}
-        <button type="button" class="link" onclick={clearSearch}>Clear</button>
+        <button type="button" class="clear" onclick={clearSearch} title="Clear search"><Icon name="x" size={14} /></button>
       {/if}
     </form>
-    <div class="list-title">
-      {searching ? `Results for “${query}”` : folderName}
-      {#if searching && !loadingList}<span class="muted"> · {list.length}</span>{/if}
+    <div class="spacer" data-tauri-drag-region></div>
+    <div class="win">
+      <button onclick={() => (showSettings = true)} title="Settings"><Icon name="settings" size={17} /></button>
+      <span class="divider"></span>
+      <button onclick={() => appWindow.minimize()} title="Minimise"><Icon name="minimize" size={15} /></button>
+      <button onclick={() => appWindow.toggleMaximize()} title="Maximise"><Icon name="maximize" size={13} /></button>
+      <button class="close" onclick={() => appWindow.close()} title="Close"><Icon name="close" size={15} /></button>
     </div>
-    <div class="list" onscroll={onListScroll}>
-      {#each list as m (m.id)}
-        <button class="row" class:selected={m.id === selectedId} class:unread={m.unread} onclick={() => select(m.id)}>
-          <div class="row-top">
-            <span class="ellipsis sender">{sender(m)}</span>
-            <span class="date">{shortDate(m.date)}</span>
-          </div>
-          <div class="row-subject ellipsis">
-            {#if m.starred}<span class="star">★</span>{/if}
-            {#if m.attachments > 0}<span class="clip" title="Has attachments">📎</span>{/if}
-            {m.subject || "(no subject)"}
-          </div>
-          <div class="row-snippet ellipsis">{m.snippet}</div>
-        </button>
-      {:else}
-        {#if !loadingList && accounts.length}
-          <div class="empty">{searching ? "No messages match." : "This folder is empty."}</div>
-        {/if}
-      {/each}
-      {#if loadingList}<div class="empty">Loading…</div>{/if}
-    </div>
-  </section>
+  </header>
 
-  <main class="reader">
-    {#if !accounts.length}
-      <div class="welcome">
-        <h1>Welcome to OxyMail</h1>
-        <p>Import a Maildir archive, such as the Mailbird export, to get started.</p>
-        <div class="import">
-          <input bind:value={importPath} />
-          <button class="primary" onclick={runImport} disabled={importing}>
-            {importing ? "Importing…" : "Import"}
+  <div class="shell">
+    <aside class="sidebar">
+      <nav>
+        {#each accounts as account (account.id)}
+          <div class="account">
+            <button class="account-name" onclick={() => toggleAccount(account.id)} title={account.name}>
+              <span class="chevron" class:open={expanded[account.id]}>›</span>
+              <span class="ellipsis">{account.name}</span>
+            </button>
+            {#if expanded[account.id]}
+              {#each foldersByAccount[account.id] ?? [] as f (f.id)}
+                <button class="folder" class:active={f.id === folder?.id && !searching} onclick={() => openFolder(f)}>
+                  <span class="ellipsis">{f.name}</span>
+                  {#if showUnread(f)}<span class="count">{f.unread.toLocaleString()}</span>{/if}
+                </button>
+              {/each}
+            {/if}
+          </div>
+        {/each}
+      </nav>
+      {#if accounts.length}
+        <div class="sidebar-foot">{accounts.length} archive accounts</div>
+      {/if}
+    </aside>
+
+    <section class="list-pane">
+      <div class="list-title">
+        <span class="ellipsis">{searching ? `Results for “${query}”` : (folder?.name ?? "")}</span>
+        {#if searching && !loadingList}<span class="muted">{list.length}</span>{/if}
+      </div>
+      <div class="list" onscroll={onListScroll}>
+        {#each list as m (m.id)}
+          <div class="row" class:selected={m.id === selectedId} class:unread={m.unread}>
+            <button class="row-main" onclick={() => select(m.id)}>
+              <div class="row-top">
+                <span class="ellipsis sender">{sender(m)}</span>
+                <span class="date">{shortDate(m.date)}</span>
+              </div>
+              <div class="row-subject ellipsis">
+                {#if m.attachments > 0}<span class="clip"><Icon name="clip" size={12} /></span>{/if}
+                {m.subject || "(no subject)"}
+              </div>
+              {#if settings.density !== "compact"}
+                <div class="row-snippet ellipsis">{m.snippet}</div>
+              {/if}
+              {#if searching}<div class="row-folder">{m.folder_name}</div>{/if}
+            </button>
+            <div class="row-actions">
+              <button class:starred={m.starred} onclick={() => toggleStar(m)} title={m.starred ? "Unstar" : "Star"}>
+                <Icon name="star" size={15} />
+              </button>
+              {#if m.folder_role !== "archive" && m.folder_role !== "trash"}
+                <button onclick={() => archive(m)} title="Archive"><Icon name="archive" size={15} /></button>
+              {/if}
+              <button onclick={() => remove(m)} title={m.folder_role === "trash" ? "Remove from OxyMail" : "Delete"}>
+                <Icon name="trash" size={15} />
+              </button>
+            </div>
+            {#if m.starred}<span class="star-pin"><Icon name="star" size={12} /></span>{/if}
+          </div>
+        {:else}
+          {#if !loadingList && accounts.length}
+            <div class="empty">{searching ? "No messages match." : "Nothing here."}</div>
+          {/if}
+        {/each}
+        {#if loadingList}<div class="empty">Loading…</div>{/if}
+      </div>
+    </section>
+
+    <main class="reader">
+      {#if !accounts.length}
+        <div class="welcome">
+          <Logo size={64} />
+          <h1>Welcome to OxyMail</h1>
+          <p>Email with room to breathe. Import a Maildir archive, such as your Mailbird export, to begin.</p>
+          <div class="import">
+            <input bind:value={importPath} />
+            <button class="primary" onclick={runImport} disabled={importing}>{importing ? "Importing…" : "Import"}</button>
+          </div>
+        </div>
+      {:else if view && selected}
+        <div class="toolbar">
+          {#if selectedRole === "trash"}
+            <button onclick={() => restore()}><Icon name="restore" size={16} /><span>Restore</span></button>
+            <button class="danger" onclick={() => remove()}><Icon name="trash" size={16} /><span>Remove from OxyMail</span></button>
+          {:else}
+            {#if selectedRole === "archive"}
+              <button onclick={() => moveToInbox()} title="Move to Inbox (e)"><Icon name="inbox" size={16} /><span>Move to Inbox</span></button>
+            {:else}
+              <button onclick={() => archive()} title="Archive (e)"><Icon name="archive" size={16} /><span>Archive</span></button>
+            {/if}
+            <button onclick={() => remove()} title="Delete (Del)"><Icon name="trash" size={16} /><span>Delete</span></button>
+          {/if}
+          <span class="sep"></span>
+          <button class:starred={selected.starred} onclick={() => toggleStar()} title="Star (s)">
+            <Icon name="star" size={16} /><span>{selected.starred ? "Starred" : "Star"}</span>
+          </button>
+          <button onclick={() => toggleRead()} title="Mark read or unread (u)">
+            <Icon name={selected.unread ? "open" : "mail"} size={16} /><span>{selected.unread ? "Mark read" : "Mark unread"}</span>
           </button>
         </div>
-      </div>
-    {:else if view}
-      <header class="msg-head">
-        <h1>{view.subject || "(no subject)"}</h1>
-        <div class="meta">
-          <div><span class="label">From</span>{view.from.join(", ")}</div>
-          {#if view.to.length}<div><span class="label">To</span>{view.to.join(", ")}</div>{/if}
-          {#if view.cc.length}<div><span class="label">Cc</span>{view.cc.join(", ")}</div>{/if}
-          <div class="muted">{longDate(view.date)}</div>
-        </div>
-        {#each view.notices as notice}
-          <div class="notice">{notice}</div>
-        {/each}
-        {#if view.attachments.length}
-          <div class="attachments">
-            {#each view.attachments as a (a.index)}
-              <button class="chip" onclick={() => save(a.index)} title="Save to Downloads">
-                <span class="ellipsis">{a.name}</span>
-                <span class="muted">{formatSize(a.size)}</span>
-              </button>
-            {/each}
+        <header class="msg-head">
+          <h1>{view.subject || "(no subject)"}</h1>
+          <div class="meta">
+            <div><span class="label">From</span><span class="value">{view.from.join(", ")}</span></div>
+            {#if view.to.length}<div><span class="label">To</span><span class="value">{view.to.join(", ")}</span></div>{/if}
+            {#if view.cc.length}<div><span class="label">Cc</span><span class="value">{view.cc.join(", ")}</span></div>{/if}
+            <div class="muted">{longDate(view.date)}</div>
           </div>
+          {#each view.notices as notice}<div class="notice">{notice}</div>{/each}
+          {#if view.attachments.length}
+            <div class="attachments">
+              {#each view.attachments as a (a.index)}
+                <button class="chip" onclick={() => act(async () => flash(`Saved to ${await api.saveAttachment(view.id, a.index)}`))} title="Save to Downloads">
+                  <Icon name="clip" size={13} />
+                  <span class="ellipsis">{a.name}</span>
+                  <span class="muted">{formatSize(a.size)}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </header>
+        {#if view.html}
+          <iframe class="body-frame" title="Message" sandbox="allow-popups" srcdoc={messageDocument(view.html)}></iframe>
+        {:else}
+          <pre class="body-text">{view.text ?? ""}</pre>
         {/if}
-      </header>
-      {#if view.html}
-        <iframe class="body-frame" title="Message" sandbox="allow-popups" srcdoc={messageDocument(view.html)}></iframe>
       {:else}
-        <pre class="body-text">{view.text ?? ""}</pre>
+        <div class="placeholder">
+          <Logo size={40} />
+          <p>Select a message to read it.</p>
+        </div>
       {/if}
-    {:else}
-      <div class="placeholder">Select a message to read it.</div>
-    {/if}
-  </main>
+    </main>
+  </div>
 </div>
 
-{#if toast}<div class="toast">{toast}</div>{/if}
+{#if showSettings}
+  <Settings
+    {settings}
+    {accounts}
+    onchange={changeSetting}
+    onclose={() => (showSettings = false)}
+    onimported={loadAccounts}
+  />
+{/if}
+
+{#if toast}
+  <div class="toast">
+    <span>{toast.message}</span>
+    {#if toast.undo}
+      <button onclick={() => { const u = toast.undo; toast = null; u(); }}>Undo</button>
+    {/if}
+  </div>
+{/if}
 {#if error}
   <button class="toast error" onclick={() => (error = "")}>{error} — dismiss</button>
 {/if}
 
 <style>
-  .shell {
+  .app { display: grid; grid-template-rows: 46px 1fr; height: 100%; }
+
+  /* ---- Header bar ---- */
+  .titlebar {
     display: grid;
-    grid-template-columns: 250px 380px 1fr;
-    height: 100%;
-  }
-
-  .sidebar {
-    display: flex;
-    flex-direction: column;
-    background: var(--sidebar);
-    border-right: 1px solid var(--border);
-    min-width: 0;
-  }
-  .brand {
-    padding: 16px 18px 10px;
-    font-weight: 700;
-    font-size: 16px;
-    letter-spacing: -0.01em;
-  }
-  nav {
-    flex: 1;
-    overflow-y: auto;
-    padding: 4px 8px 12px;
-  }
-  .account { margin-bottom: 2px; }
-  .account-name {
-    display: flex;
+    grid-template-columns: 250px 380px 1fr auto;
     align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 6px 8px;
-    border-radius: 6px;
-    font-weight: 600;
-    font-size: 13px;
-    text-align: left;
+    background: var(--header);
+    border-bottom: 1px solid var(--border);
   }
-  .account-name:hover { background: var(--border); }
-  .chevron { display: inline-block; width: 10px; color: var(--muted); transition: transform 0.12s; }
-  .chevron.open { transform: rotate(90deg); }
-  .folder {
-    display: flex;
-    justify-content: space-between;
-    gap: 8px;
-    width: 100%;
-    padding: 5px 8px 5px 26px;
-    border-radius: 6px;
-    font-size: 13px;
-    text-align: left;
-    color: var(--muted);
-  }
-  .folder:hover { background: var(--border); color: var(--text); }
-  .folder.active { background: var(--selected); color: var(--text); font-weight: 600; }
-  .count { font-size: 12px; color: var(--accent); font-weight: 600; }
-  .sidebar-foot { padding: 10px 18px; font-size: 12px; color: var(--faint); border-top: 1px solid var(--border); }
-
-  .list-pane {
-    display: flex;
-    flex-direction: column;
-    background: var(--panel);
-    border-right: 1px solid var(--border);
-    min-width: 0;
-  }
+  .brand { display: flex; align-items: center; gap: 9px; padding-left: 16px; height: 100%; }
+  .brand :global(*) { pointer-events: none; }
+  .wordmark { font-size: 16px; letter-spacing: -0.03em; font-weight: 450; }
+  .wordmark b { font-weight: 800; color: var(--brand); }
   .search {
     display: flex;
-    gap: 8px;
     align-items: center;
-    padding: 12px 12px 6px;
-  }
-  .search input {
-    flex: 1;
-    padding: 8px 10px;
+    gap: 8px;
+    margin: 0 12px;
+    padding: 0 10px;
+    height: 32px;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--bg);
-    outline: none;
+    color: var(--muted);
   }
-  .search input:focus { border-color: var(--accent); }
-  .link { color: var(--accent); font-size: 13px; }
-  .list-title { padding: 6px 16px 8px; font-weight: 600; font-size: 13px; }
+  .search:focus-within { border-color: var(--accent); color: var(--text); }
+  .search input { flex: 1; min-width: 0; border: 0; background: none; outline: none; }
+  .search input::-webkit-search-cancel-button { display: none; }
+  .clear { display: grid; place-items: center; color: var(--muted); }
+  .spacer { height: 100%; }
+  .win { display: flex; align-items: center; gap: 2px; padding-right: 8px; }
+  .win button { display: grid; place-items: center; width: 32px; height: 30px; border-radius: 6px; color: var(--muted); }
+  .win button:hover { background: var(--hover); color: var(--text); }
+  .win .close:hover { background: var(--danger); color: #fff; }
+  .divider { width: 1px; height: 18px; margin: 0 6px; background: var(--border); }
+
+  .shell { display: grid; grid-template-columns: 250px 380px 1fr; min-height: 0; }
+
+  /* ---- Sidebar ---- */
+  .sidebar { display: flex; flex-direction: column; background: var(--sidebar); border-right: 1px solid var(--border); min-width: 0; }
+  nav { flex: 1; overflow-y: auto; padding: 10px 8px 12px; }
+  .account { margin-bottom: 2px; }
+  .account-name { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 8px; border-radius: 6px; font-weight: 600; font-size: 13px; text-align: left; }
+  .account-name:hover { background: var(--hover); }
+  .chevron { display: inline-block; width: 10px; color: var(--muted); transition: transform 0.12s; }
+  .chevron.open { transform: rotate(90deg); }
+  .folder { display: flex; justify-content: space-between; gap: 8px; width: 100%; padding: 5px 8px 5px 26px; border-radius: 6px; font-size: 13px; text-align: left; color: var(--muted); }
+  .folder:hover { background: var(--hover); color: var(--text); }
+  .folder.active { background: var(--selected); color: var(--text); font-weight: 600; }
+  .count { font-size: 12px; color: var(--accent); font-weight: 700; }
+  .sidebar-foot { padding: 10px 18px; font-size: 12px; color: var(--faint); border-top: 1px solid var(--border); }
+
+  /* ---- Message list ---- */
+  .list-pane { display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--border); min-width: 0; }
+  .list-title { display: flex; justify-content: space-between; gap: 8px; padding: 12px 16px 10px; font-weight: 700; font-size: 14px; border-bottom: 1px solid var(--border); }
   .list { flex: 1; overflow-y: auto; }
-  .row {
-    display: block;
-    width: 100%;
-    padding: 10px 16px;
-    text-align: left;
-    border-bottom: 1px solid var(--border);
-    border-left: 3px solid transparent;
-  }
+  .row { position: relative; border-bottom: 1px solid var(--border); border-left: 3px solid transparent; }
   .row:hover { background: var(--bg); }
   .row.selected { background: var(--selected); }
   .row.unread { border-left-color: var(--accent); }
   .row.unread .sender, .row.unread .row-subject { font-weight: 700; }
+  .row-main { display: block; width: 100%; padding: 10px 16px 10px 13px; text-align: left; }
+  .compact .row-main { padding: 6px 16px 6px 13px; }
   .row-top { display: flex; justify-content: space-between; gap: 10px; }
   .sender { font-size: 13px; }
   .date { flex-shrink: 0; font-size: 12px; color: var(--muted); }
-  .row-subject { font-size: 13px; margin-top: 1px; }
+  .row-subject { display: flex; align-items: center; gap: 4px; font-size: 13px; margin-top: 1px; }
   .row-snippet { font-size: 12px; color: var(--muted); margin-top: 2px; }
-  .star { color: #e3a400; margin-right: 4px; }
-  .clip { margin-right: 4px; font-size: 11px; }
-
-  .reader {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
+  .row-folder { display: inline-block; margin-top: 4px; padding: 0 7px; border-radius: 99px; font-size: 11px; background: var(--accent-soft); color: var(--accent); }
+  .clip { display: inline-flex; color: var(--muted); }
+  .row-actions {
+    position: absolute;
+    right: 8px;
+    bottom: 6px;
+    display: none;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 7px;
     background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: 0 2px 6px rgb(0 0 0 / 0.08);
   }
-  .msg-head { padding: 20px 24px 14px; border-bottom: 1px solid var(--border); }
+  .row:hover .row-actions { display: flex; }
+  .row-actions button { display: grid; place-items: center; width: 28px; height: 26px; border-radius: 5px; color: var(--muted); }
+  .row-actions button:hover { background: var(--hover); color: var(--text); }
+  .row-actions button.starred, .toolbar button.starred { color: var(--star); }
+  .row-actions button.starred :global(path), .toolbar button.starred :global(path), .star-pin :global(path) { fill: currentColor; }
+  .star-pin { position: absolute; right: 12px; bottom: 9px; color: var(--star); display: flex; }
+  .row:hover .star-pin { display: none; }
+
+  /* ---- Reader ---- */
+  .reader { display: flex; flex-direction: column; min-width: 0; background: var(--panel); }
+  .toolbar { display: flex; align-items: center; gap: 2px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+  .toolbar button { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 6px; font-size: 13px; color: var(--muted); }
+  .toolbar button:hover { background: var(--hover); color: var(--text); }
+  .toolbar button.danger:hover { color: var(--danger); }
+  .sep { width: 1px; height: 18px; margin: 0 6px; background: var(--border); }
+  .msg-head { padding: 18px 24px 14px; border-bottom: 1px solid var(--border); user-select: text; }
   .msg-head h1 { margin: 0 0 10px; font-size: 19px; line-height: 1.3; font-weight: 650; }
   .meta { font-size: 13px; display: grid; gap: 2px; }
   .label { display: inline-block; width: 42px; color: var(--muted); }
-  .notice {
-    margin-top: 10px;
-    padding: 8px 10px;
-    border-radius: 6px;
-    background: var(--warn-bg);
-    color: var(--warn-text);
-    font-size: 13px;
-  }
+  .notice { margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-text); font-size: 13px; }
   .attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-  .chip {
-    display: flex;
-    gap: 8px;
-    max-width: 280px;
-    padding: 6px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    font-size: 12px;
-  }
+  .chip { display: flex; align-items: center; gap: 7px; max-width: 300px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px; }
   .chip:hover { border-color: var(--accent); background: var(--accent-soft); }
   .body-frame { flex: 1; width: 100%; border: 0; background: #fff; }
-  .body-text {
-    flex: 1;
-    margin: 0;
-    padding: 20px 24px;
-    overflow: auto;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    font: 14px/1.5 ui-monospace, "Cascadia Mono", "Ubuntu Mono", monospace;
-  }
+  .body-text { flex: 1; margin: 0; padding: 20px 24px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 14px/1.5 ui-monospace, "Ubuntu Mono", monospace; user-select: text; }
 
-  .placeholder, .empty { padding: 24px; color: var(--muted); text-align: center; }
-  .placeholder { margin: auto; }
-  .welcome { margin: auto; max-width: 460px; padding: 24px; }
-  .welcome h1 { font-size: 22px; margin: 0 0 6px; }
+  .placeholder { margin: auto; display: grid; justify-items: center; gap: 4px; color: var(--muted); opacity: 0.8; }
+  .empty { padding: 24px; color: var(--muted); text-align: center; }
+  .welcome { margin: auto; max-width: 480px; padding: 24px; display: grid; justify-items: start; }
+  .welcome h1 { font-size: 22px; margin: 14px 0 6px; }
   .welcome p { color: var(--muted); margin: 0 0 16px; }
-  .import { display: flex; gap: 8px; }
-  .import input {
-    flex: 1;
-    padding: 8px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg);
-  }
-  .primary {
-    padding: 8px 16px;
-    border-radius: var(--radius);
-    background: var(--accent);
-    color: #fff;
-    font-weight: 600;
-  }
+  .import { display: flex; gap: 8px; width: 100%; }
+  .import input { flex: 1; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
+  .primary { padding: 8px 16px; border-radius: var(--radius); background: var(--accent); color: #fff; font-weight: 600; }
   .primary:disabled { opacity: 0.6; cursor: default; }
 
-  .muted { color: var(--muted); }
+  .muted { color: var(--muted); font-weight: 400; }
   .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
   .toast {
@@ -445,6 +584,9 @@
     bottom: 18px;
     left: 50%;
     transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 16px;
     max-width: 70vw;
     padding: 10px 16px;
     border-radius: var(--radius);
@@ -452,6 +594,8 @@
     color: var(--panel);
     font-size: 13px;
     box-shadow: 0 6px 24px rgb(0 0 0 / 0.2);
+    z-index: 30;
   }
-  .toast.error { background: #b42318; color: #fff; }
+  .toast button { color: var(--amber); font-weight: 700; }
+  .toast.error { background: var(--danger); color: #fff; }
 </style>

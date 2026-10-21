@@ -1,6 +1,7 @@
 // Hides the extra console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -59,6 +60,50 @@ fn save_attachment(state: State<AppState>, id: i64, index: usize) -> Res<String>
 }
 
 #[tauri::command]
+fn set_flag(state: State<AppState>, ids: Vec<i64>, flag: char, on: bool) -> Res<()> {
+    state.0.lock().map_err(err)?.set_flag(&ids, flag, on).map_err(err)
+}
+
+/// Moves messages to the account's Inbox or Archive.
+#[tauri::command]
+fn move_to(state: State<AppState>, ids: Vec<i64>, role: String) -> Res<()> {
+    if role != "inbox" && role != "archive" {
+        return Err(format!("cannot move to {role}"));
+    }
+    state.0.lock().map_err(err)?.move_to_role(&ids, &role).map_err(err)
+}
+
+#[tauri::command]
+fn move_to_folder(state: State<AppState>, ids: Vec<i64>, folder_id: i64) -> Res<()> {
+    state.0.lock().map_err(err)?.move_to_folder(&ids, folder_id).map_err(err)
+}
+
+#[tauri::command]
+fn delete(state: State<AppState>, ids: Vec<i64>) -> Res<()> {
+    state.0.lock().map_err(err)?.delete(&ids).map_err(err)
+}
+
+#[tauri::command]
+fn restore(state: State<AppState>, ids: Vec<i64>) -> Res<()> {
+    state.0.lock().map_err(err)?.restore(&ids).map_err(err)
+}
+
+#[tauri::command]
+fn settings(state: State<AppState>) -> Res<BTreeMap<String, String>> {
+    state.0.lock().map_err(err)?.settings().map_err(err)
+}
+
+#[tauri::command]
+fn set_setting(state: State<AppState>, key: String, value: String) -> Res<()> {
+    state.0.lock().map_err(err)?.set_setting(&key, &value).map_err(err)
+}
+
+#[tauri::command]
+fn data_location() -> String {
+    Store::default_path().display().to_string()
+}
+
+#[tauri::command]
 fn import_archive(state: State<AppState>, path: String) -> Res<ImportStats> {
     let path = match path.strip_prefix("~/") {
         Some(rest) => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(rest),
@@ -78,7 +123,15 @@ fn main() {
             search,
             message,
             save_attachment,
-            import_archive
+            import_archive,
+            set_flag,
+            move_to,
+            move_to_folder,
+            delete,
+            restore,
+            settings,
+            set_setting,
+            data_location
         ])
         .run(tauri::generate_context!())
         .expect("running OxyMail");

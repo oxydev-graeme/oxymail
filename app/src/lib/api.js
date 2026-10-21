@@ -8,6 +8,20 @@ export const api = {
   message: (id) => invoke("message", { id }),
   saveAttachment: (id, index) => invoke("save_attachment", { id, index }),
   importArchive: (path) => invoke("import_archive", { path }),
+  setFlag: (ids, flag, on) => invoke("set_flag", { ids, flag, on }),
+  moveTo: (ids, role) => invoke("move_to", { ids, role }),
+  moveToFolder: (ids, folderId) => invoke("move_to_folder", { ids, folderId }),
+  remove: (ids) => invoke("delete", { ids }),
+  restore: (ids) => invoke("restore", { ids }),
+  settings: () => invoke("settings"),
+  setSetting: (key, value) => invoke("set_setting", { key, value }),
+  dataLocation: () => invoke("data_location"),
+};
+
+export const DEFAULT_SETTINGS = {
+  theme: "system",
+  density: "comfortable",
+  mark_read_on_open: "true",
 };
 
 /** Today: "14:05". This year: "21 Oct". Older: "21 Oct 2023". */
