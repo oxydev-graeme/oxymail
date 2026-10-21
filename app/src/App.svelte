@@ -656,7 +656,9 @@
 {/if}
 
 <style>
-  .app { display: grid; grid-template-rows: 46px 1fr; height: 100%; }
+  /* minmax(0, …) and min-height: 0 stop grid rows growing to fit their content, so each pane
+     gets a fixed height and its own scroll area actually scrolls. */
+  .app { display: grid; grid-template-rows: 46px minmax(0, 1fr); height: 100%; overflow: hidden; }
 
   /* ---- Header bar ---- */
   .titlebar {
@@ -702,7 +704,7 @@
   .sync-error { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--danger); color: #fff; font-size: 11px; font-weight: 800; flex-shrink: 0; }
   .divider { width: 1px; height: 18px; margin: 0 6px; background: var(--border); }
 
-  .shell { display: grid; grid-template-columns: 250px 380px 1fr; min-height: 0; }
+  .shell { display: grid; grid-template-columns: 250px 380px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); min-height: 0; }
 
   /* ---- Sidebar ---- */
   .sidebar { overflow-y: auto; background: var(--sidebar); border-right: 1px solid var(--border); min-width: 0; min-height: 0; padding-bottom: 12px; }
@@ -725,11 +727,11 @@
   .count { margin-left: auto; font-size: 11px; font-weight: 700; padding: 0 7px; border-radius: 99px; background: var(--accent); color: #fff; line-height: 18px; }
 
   /* ---- Message list ---- */
-  .list-pane { display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--border); min-width: 0; }
+  .list-pane { display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--border); min-width: 0; min-height: 0; }
   .mark-read { display: flex; align-items: center; gap: 5px; margin-left: auto; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 500; color: var(--accent); }
   .mark-read:hover { background: var(--accent-soft); }
   .list-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 16px 10px; font-weight: 700; font-size: 14px; border-bottom: 1px solid var(--border); }
-  .list { flex: 1; overflow-y: auto; }
+  .list { flex: 1; min-height: 0; overflow-y: auto; }
   .row { position: relative; border-bottom: 1px solid var(--border); border-left: 3px solid transparent; }
   .row:hover { background: var(--bg); }
   .row.selected { background: var(--selected); }
@@ -765,7 +767,7 @@
   .row:hover .star-pin { display: none; }
 
   /* ---- Reader ---- */
-  .reader { display: flex; flex-direction: column; min-width: 0; background: var(--panel); }
+  .reader { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); }
   .toolbar { display: flex; align-items: center; gap: 2px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
   .toolbar button { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 6px; font-size: 13px; color: var(--muted); }
   .toolbar button:hover { background: var(--hover); color: var(--text); }
@@ -779,8 +781,8 @@
   .attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
   .chip { display: flex; align-items: center; gap: 7px; max-width: 300px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px; }
   .chip:hover { border-color: var(--accent); background: var(--accent-soft); }
-  .body-frame { flex: 1; width: 100%; border: 0; background: #fff; }
-  .body-text { flex: 1; margin: 0; padding: 20px 24px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 14px/1.5 ui-monospace, "Ubuntu Mono", monospace; user-select: text; }
+  .body-frame { flex: 1; min-height: 0; width: 100%; border: 0; background: #fff; }
+  .body-text { flex: 1; min-height: 0; margin: 0; padding: 20px 24px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 14px/1.5 ui-monospace, "Ubuntu Mono", monospace; user-select: text; }
 
   .placeholder { margin: auto; display: grid; justify-items: center; gap: 4px; color: var(--muted); opacity: 0.8; }
   .empty { padding: 24px; color: var(--muted); text-align: center; }
