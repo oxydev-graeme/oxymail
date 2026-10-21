@@ -88,6 +88,7 @@ struct Attachment {
 struct AccountStats {
     messages: usize,
     missing_body: usize,
+    truncated_body: usize,
     attachments: usize,
     missing_attachments: usize,
     bad_dates: usize,
@@ -328,7 +329,11 @@ fn export_mail(db: &Connection, args: &Args) -> Result<BTreeMap<String, AccountS
         };
         match body {
             Some((Some(data), is_html)) => {
-                let raw = inflate(&data).with_context(|| format!("inflating body of message {id}"))?;
+                let (raw, complete) = inflate(&data);
+                if !complete {
+                    st.truncated_body += 1;
+                    builder = builder.header("X-OxyMail-Truncated", Raw::new("body"));
+                }
                 let text = match String::from_utf8(raw) {
                     Ok(s) => s,
                     Err(e) => {
@@ -478,11 +483,23 @@ fn read_attachment(store: &Path, id: i64) -> Result<Option<(String, Vec<u8>)>> {
     Ok(None)
 }
 
-fn inflate(data: &[u8]) -> Result<Vec<u8>> {
+/// Inflates a raw DEFLATE body. Empty data is an empty body. On a damaged stream, returns
+/// whatever decoded before the damage and `false`.
+fn inflate(data: &[u8]) -> (Vec<u8>, bool) {
     use std::io::Read;
+    if data.is_empty() {
+        return (Vec::new(), true);
+    }
+    let mut decoder = DeflateDecoder::new(data);
     let mut out = Vec::new();
-    DeflateDecoder::new(data).read_to_end(&mut out)?;
-    Ok(out)
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        match decoder.read(&mut chunk) {
+            Ok(0) => return (out, true),
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            Err(_) => return (out, false),
+        }
+    }
 }
 
 /// Mailbird dates look like `2025-09-07 06:50:50Z` or `2020-11-09 09:16:16.8964887Z` (UTC).
@@ -512,6 +529,7 @@ fn write_report(out: &Path, stats: &BTreeMap<String, AccountStats>) -> Result<()
     for (account, s) in stats {
         totals.messages += s.messages;
         totals.missing_body += s.missing_body;
+        totals.truncated_body += s.truncated_body;
         totals.attachments += s.attachments;
         totals.missing_attachments += s.missing_attachments;
         totals.bad_dates += s.bad_dates;
@@ -521,6 +539,7 @@ fn write_report(out: &Path, stats: &BTreeMap<String, AccountStats>) -> Result<()
             json!({
                 "messages": s.messages,
                 "missing_body": s.missing_body,
+                "truncated_body": s.truncated_body,
                 "attachments": s.attachments,
                 "missing_attachments": s.missing_attachments,
                 "bad_dates": s.bad_dates,
@@ -533,6 +552,7 @@ fn write_report(out: &Path, stats: &BTreeMap<String, AccountStats>) -> Result<()
         "totals": {
             "messages": totals.messages,
             "missing_body": totals.missing_body,
+            "truncated_body": totals.truncated_body,
             "attachments": totals.attachments,
             "missing_attachments": totals.missing_attachments,
             "bad_dates": totals.bad_dates,
