@@ -76,11 +76,17 @@ If the repo is on a network share mounted `noexec`, put the build output on a lo
 
 ## Mailbird export
 
+In the app, **Bring over Mailbird** (on the welcome screen, and in Settings → Import) takes the Mailbird `Store` folder and an empty folder to export to. It exports the store, then imports the mail, contacts and calendars from the export. Keep the export folder where it is afterwards: archive accounts are read from it.
+
+The same export is available from the command line:
+
 ```sh
 oxymail-mailbird-export --store /path/to/copy/of/Mailbird/Store --out ~/MailbirdExport
 ```
 
-- Always run it against a **copy** of `%LOCALAPPDATA%\Mailbird\Store`. The store is opened read-only either way.
+- Close Mailbird first, and preferably use a **copy** of `%LOCALAPPDATA%\Mailbird\Store`. The store is opened read-only either way. If `Store.db-wal` holds changes not yet written into `Store.db`, both are copied into the export folder, read from there, and the copy is removed.
+- The export folder must be empty, or an earlier export (one with `report.json`).
+- **Antivirus:** an attachment antivirus won't let us read is marked with `X-OxyMail-Blocked-Attachment`. A message antivirus won't let us write is skipped and its Mailbird id listed in `report.json`. Either way, the original stays in the store.
 - **Mail:** Maildir output at `mail/<account>/<folder>/cur/`. A message that sits in several folders, such as Gmail labels, is hard-linked rather than copied.
 - **Raw tables:** every non-secret table is written to `raw/<table>.jsonl`. Passwords, OAuth tokens and sync tokens are never exported.
 - **Report:** `report.json` lists counts per account and folder, along with any missing bodies or attachments.

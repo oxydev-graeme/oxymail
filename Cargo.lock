@@ -3343,6 +3343,7 @@ dependencies = [
  "dirs",
  "open",
  "oxymail-core",
+ "oxymail-mailbird-export",
  "oxymail-sync",
  "serde",
  "serde_json",

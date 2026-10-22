@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use oxymail_core::{Account, AccountUpdate, Folder, ImportStats, MessageSummary, MessageView, Store};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 mod live;
 
@@ -313,6 +313,60 @@ fn import_archive(state: State<AppState>, path: String) -> Res<ImportStats> {
     state.0.lock().map_err(err)?.import_archive(&path, |_| {}).map_err(err)
 }
 
+/// True if the folder is a Mailbird `Store` (it holds Store.db) rather than an export.
+#[tauri::command]
+fn is_mailbird_store(path: String) -> bool {
+    oxymail_mailbird_export::is_store(&expand_home(&path))
+}
+
+/// Where the export goes unless the user picks somewhere else.
+#[tauri::command]
+fn default_export_folder() -> String {
+    dirs::home_dir().unwrap_or_default().join("MailbirdExport").display().to_string()
+}
+
+#[derive(Clone, serde::Serialize)]
+struct MailbirdProgress {
+    /// "export", "import" or "contacts"
+    stage: &'static str,
+    done: usize,
+    /// 0 when the total isn't known
+    total: usize,
+}
+
+#[derive(serde::Serialize)]
+struct MailbirdResult {
+    export: oxymail_mailbird_export::Summary,
+    mail: ImportStats,
+    pim: oxymail_core::PimImport,
+}
+
+/// Exports a copy of a Mailbird store to open formats in `out`, then imports the mail, contacts
+/// and calendars from it. The store is only read. Progress arrives as `mailbird-progress` events.
+#[tauri::command]
+async fn migrate_mailbird(app: AppHandle, store: String, out: String) -> Res<MailbirdResult> {
+    let store = expand_home(&store);
+    let out = expand_home(&out);
+    tauri::async_runtime::spawn_blocking(move || {
+        let emit = |stage, done, total| {
+            let _ = app.emit("mailbird-progress", MailbirdProgress { stage, done, total });
+        };
+        let options = oxymail_mailbird_export::Options::default();
+        let export = oxymail_mailbird_export::export(&store, &out, &options, |p| emit("export", p.done, p.total))
+            .map_err(|e| format!("{e:#}"))?;
+
+        let state = app.state::<AppState>();
+        let mut db = state.0.lock().map_err(err)?;
+        emit("import", 0, 0);
+        let mail = db.import_archive(&out.join("mail"), |n| emit("import", n, 0)).map_err(|e| format!("{e:#}"))?;
+        emit("contacts", 0, 0);
+        let pim = db.import_pim_folder(&out).map_err(|e| format!("{e:#}"))?;
+        Ok(MailbirdResult { export, mail, pim })
+    })
+    .await
+    .map_err(err)?
+}
+
 fn main() {
     oxymail_sync::init();
     let store = Store::open(&Store::default_path()).expect("opening the OxyMail store");
@@ -373,6 +427,9 @@ fn main() {
             message,
             save_attachment,
             import_archive,
+            is_mailbird_store,
+            default_export_folder,
+            migrate_mailbird,
             set_flag,
             live::move_to,
             live::move_to_folder,

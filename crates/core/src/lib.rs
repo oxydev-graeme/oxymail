@@ -337,10 +337,16 @@ impl Store {
     /// Imports a tree laid out as `<root>/<account>/<folder>/{cur,new}` as read-only archive
     /// accounts. Safe to run again: files already indexed are skipped.
     pub fn import_archive(&mut self, root: &Path, mut progress: impl FnMut(usize)) -> Result<ImportStats> {
+        let root = &archive_root(root)?;
         let mut stats = ImportStats::default();
         let parser = MessageParser::default();
         let tx = self.db.transaction()?;
         for account_dir in sorted_dirs(root)? {
+            // Only Maildir folders are imported; anything else in the tree is left alone.
+            let folder_dirs: Vec<PathBuf> = sorted_dirs(&account_dir)?.into_iter().filter(|d| is_maildir(d)).collect();
+            if folder_dirs.is_empty() {
+                continue;
+            }
             let account_name = file_name(&account_dir);
             let root_str = account_dir.to_string_lossy().to_string();
             // Matched on archive_root, so an archive later connected to its server is still found.
@@ -361,7 +367,7 @@ impl Store {
                     tx.last_insert_rowid()
                 }
             };
-            for folder_dir in sorted_dirs(&account_dir)? {
+            for folder_dir in folder_dirs {
                 let folder_name = file_name(&folder_dir);
                 tx.execute(
                     "insert or ignore into folders (account_id, name, role) values (?1, ?2, ?3)",
@@ -1355,6 +1361,34 @@ fn folder_role(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Works out the `<account>/<folder>/cur` tree to import from the folder the user chose. The
+/// top of a Mailbird export (holding `mail/`) is accepted for its `mail` folder. A Mailbird
+/// `Store` folder, or any folder with no Maildir in it, is refused before anything is indexed.
+fn archive_root(chosen: &Path) -> Result<PathBuf> {
+    if chosen.join("Store.db").is_file() {
+        bail!(
+            "{} is a Mailbird store, not an export. Use \"Bring over Mailbird\" to export it first.",
+            chosen.display()
+        );
+    }
+    let root = if chosen.join("mail").is_dir() && !is_maildir(&chosen.join("mail")) {
+        chosen.join("mail")
+    } else {
+        chosen.to_path_buf()
+    };
+    let has_maildir = sorted_dirs(&root)?
+        .iter()
+        .any(|account| sorted_dirs(account).map(|f| f.iter().any(|d| is_maildir(d))).unwrap_or(false));
+    if !has_maildir {
+        bail!("No Maildir folders were found in {}. Choose a folder laid out as account / folder / cur.", root.display());
+    }
+    Ok(root)
+}
+
+fn is_maildir(dir: &Path) -> bool {
+    dir.join("cur").is_dir() || dir.join("new").is_dir()
+}
+
 /// Separates a Maildir file name from its flags. Windows forbids `:` in file names, so there
 /// it is `;` (the convention Maildir tools use on Windows).
 pub const MAILDIR_INFO: &str = if cfg!(windows) { ";2," } else { ":2," };
@@ -1515,6 +1549,41 @@ mod tests {
     #[test]
     fn truncate_respects_char_boundaries() {
         assert_eq!(truncate("héllo", 2), "hé");
+    }
+
+    #[test]
+    fn import_refuses_a_mailbird_store_and_folders_without_maildir() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("oxymail-test-root-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut store = Store::open(&dir.join("test.db"))?;
+
+        // A raw Mailbird store: Store.db beside A/<attachment id>/ folders.
+        let raw = dir.join("Store");
+        fs::create_dir_all(raw.join("A/123"))?;
+        fs::write(raw.join("Store.db"), b"")?;
+        let e = store.import_archive(&raw, |_| {}).unwrap_err().to_string();
+        assert!(e.contains("Mailbird store"), "{e}");
+
+        fs::remove_file(raw.join("Store.db"))?;
+        assert!(store.import_archive(&raw, |_| {}).is_err());
+        assert!(store.accounts()?.is_empty(), "nothing may be created from a refused folder");
+
+        // The top of an export is accepted for its mail/ folder; stray folders are skipped.
+        let export = dir.join("Export");
+        fs::create_dir_all(export.join("mail/me@example.com/Inbox/cur"))?;
+        fs::create_dir_all(export.join("mail/me@example.com/notes"))?;
+        fs::create_dir_all(export.join("mail/stray"))?;
+        fs::write(
+            export.join(format!("mail/me@example.com/Inbox/cur/1.M1.oxymail{MAILDIR_INFO}S")),
+            "From: a@example.com\r\nSubject: Hi\r\n\r\nHello\r\n",
+        )?;
+        let stats = store.import_archive(&export, |_| {})?;
+        assert_eq!((stats.folders, stats.added), (1, 1));
+        assert_eq!(store.accounts()?.len(), 1);
+
+        drop(store);
+        let _ = fs::remove_dir_all(&dir);
+        Ok(())
     }
 
     #[test]

@@ -10,7 +10,7 @@ use anyhow::Result;
 use base64::Engine;
 use rusqlite::Connection;
 
-#[derive(Default, serde::Serialize)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct ExtrasStats {
     pub contacts: usize,
     pub collected_addresses: usize,

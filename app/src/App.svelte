@@ -5,6 +5,7 @@
   import Logo from "./lib/Logo.svelte";
   import Icon from "./lib/Icon.svelte";
   import Settings from "./lib/Settings.svelte";
+  import MailbirdImport from "./lib/MailbirdImport.svelte";
   import Avatar from "./lib/Avatar.svelte";
   import Compose from "./lib/Compose.svelte";
   import MovePicker from "./lib/MovePicker.svelte";
@@ -823,6 +824,12 @@
     }, seconds * 1000);
   }
 
+  async function afterMailbird() {
+    await loadAccounts();
+    refreshCalendars();
+    contactsKey++;
+  }
+
   async function runImport() {
     importing = true;
     try {
@@ -1088,11 +1095,15 @@
         <div class="welcome">
           <Logo size={64} />
           <h1>Welcome to OxyMail</h1>
-          <p>Email with room to breathe. Import a Maildir archive, such as your Mailbird export, to begin.</p>
-          <div class="import">
-            <input bind:value={importPath} />
-            <button class="primary" onclick={runImport} disabled={importing}>{importing ? "Importing…" : "Import"}</button>
-          </div>
+          <p>Email with room to breathe. Bring over your mail, contacts and calendars from Mailbird to begin.</p>
+          <MailbirdImport ondone={afterMailbird} />
+          <details class="maildir">
+            <summary>Or import a Maildir archive you already have</summary>
+            <div class="import">
+              <input bind:value={importPath} />
+              <button class="primary" onclick={runImport} disabled={importing}>{importing ? "Importing…" : "Import"}</button>
+            </div>
+          </details>
         </div>
       {:else if multi}
         <div class="bulk">
@@ -1478,6 +1489,8 @@
   .welcome { margin: auto; max-width: 480px; padding: 24px; display: grid; justify-items: start; }
   .welcome h1 { font-size: 22px; margin: 14px 0 6px; }
   .welcome p { color: var(--muted); margin: 0 0 16px; }
+  .maildir { width: 100%; margin-top: 20px; font-size: 13px; color: var(--muted); }
+  .maildir summary { cursor: pointer; margin-bottom: 8px; }
   .import { display: flex; gap: 8px; width: 100%; }
   .import input { flex: 1; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
   .primary { padding: 8px 16px; border-radius: var(--radius); background: var(--accent); color: #fff; font-weight: 600; }

@@ -5,6 +5,7 @@
   import Logo from "./Logo.svelte";
   import AccountsSettings from "./AccountsSettings.svelte";
   import SignInSettings from "./SignInSettings.svelte";
+  import MailbirdImport from "./MailbirdImport.svelte";
 
   let { settings, accounts, onchange, onclose, onimported, onaccountschanged, oncheckupdates, update = null, updating = null, oninstallupdate } = $props();
   let version = $state("");
@@ -157,6 +158,10 @@
         <SignInSettings />
       {:else if section === "import"}
         <h2>Import</h2>
+        <div class="field">
+          <div class="label">Bring over Mailbird</div>
+          <MailbirdImport ondone={onimported} />
+        </div>
         <div class="field">
           <div class="label">Import an archive</div>
           <div class="row">
