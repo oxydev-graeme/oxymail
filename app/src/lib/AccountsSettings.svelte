@@ -217,7 +217,7 @@
     </label>
     <label>
       <span class="label">Your name when sending</span>
-      <input bind:value={draft.sender_name} placeholder="e.g. Graeme Bosworth" />
+      <input bind:value={draft.sender_name} placeholder="e.g. Jane Smith" />
     </label>
   </div>
 

@@ -21,23 +21,23 @@ const server = createServer(async (req, res) => {
 
 const mock = () => {
   const colors = ["#3f3151", "#92d050", "#c00000", "#244061", "#00b050", "#974806", "#4f6128", "#205867", "#7030a0", "#002060"];
-  const names = ["hello@oxyaccounting.co.za", "oxyaccweb@gmail.com", "gbosworth@topfiremedia.com", "graemebosworth99@gmail.com",
-    "itsreubenite@gmail.com", "reuben@reubenite.co.za", "studio@oxydev.co", "hello@oxydev.co.za", "graeme@oxydev.co.za",
-    "accounts@oxydev.co.za", "oxydev.web@gmail.com", "franchisewebdevelopment@gmail.com", "graeme@atomiccreative.co.uk",
-    "practexerp@gmail.com", "accounts@practex.co.za", "toolbecontinued@gmail.com", "graeme.bosworth@windsorcreative.org.nz", "junia@oxydev.co.za"];
-  const accounts = names.map((name, i) => ({ id: i + 1, name, kind: i === 8 ? "imap" : "archive", label: null, sender_name: "Graeme Bosworth",
-    color: colors[i % colors.length], signature: i === 8 ? "<b>Graeme Bosworth</b><div>Mobile: 061 000 0000</div>" : null, icon: null, has_archive: true, unread: i % 4 === 0 ? 12 * i + 3 : 0 }));
+  const names = ["hello@oxyaccounting.co.za", "oxyaccweb@gmail.com", "jane@northwind.example", "jane.smith@gmail.example",
+    "itsreubenite@gmail.com", "reuben@reubenite.co.za", "studio@oxydev.co", "hello@oxydev.co.za", "jane@oxydev.co.za",
+    "accounts@oxydev.co.za", "oxydev.web@gmail.com", "franchisewebdevelopment@gmail.com", "jane@atomicstudio.example",
+    "practexerp@gmail.com", "accounts@practex.co.za", "toolbecontinued@gmail.com", "jane@harbourcreative.example", "junia@oxydev.co.za"];
+  const accounts = names.map((name, i) => ({ id: i + 1, name, kind: i === 8 ? "imap" : "archive", label: null, sender_name: "Jane Smith",
+    color: colors[i % colors.length], signature: i === 8 ? "<b>Jane Smith</b><div>Mobile: 061 000 0000</div>" : null, icon: null, has_archive: true, unread: i % 4 === 0 ? 12 * i + 3 : 0 }));
   const folderNames = [["Inbox", "inbox"], ["Drafts", "drafts"], ["Sent", "sent"], ["Archive", "archive"], ["Clients / Bay Solar", null], ["Invoices", null], ["Spam", "spam"], ["Trash", "trash"]];
   const folders = (aid) => folderNames.map(([name, role], j) => ({ id: aid * 100 + j, account_id: aid, name, role, total: 500 - j * 40, unread: j === 0 ? 7 : 0 }));
   const now = Math.floor(Date.now() / 1000);
   const msgs = (fid) => Array.from({ length: 60 }, (_, k) => ({ id: fid * 1000 + k, folder_id: fid, folder_name: "Inbox", folder_role: "inbox", account_id: Math.floor(fid / 100),
     date: now - k * 7200, from_name: ["Monica from Euro Appliances", "Asana", "OxyDev", "Darin Halford", "Google Workspace"][k % 5], from_addr: "x@example.com",
     subject: ["RE: Tax Invoice - INV0000146 for the period ending September and the rest of a long subject line", "New comment on Home page [Final Revisions]", "INV-00050 invoice viewed", "Bay Solar rebuild — next steps", "Security alert"][k % 5],
-    snippet: "Hi Graeme, please find attached the updated invoice as discussed on our call this morning. Let me know if anything needs changing before month end.",
+    snippet: "Hi Jane, please find attached the updated invoice as discussed on our call this morning. Let me know if anything needs changing before month end.",
     unread: k % 3 === 0, starred: k % 7 === 0, attachments: k % 4 === 0 ? 2 : 0 }));
   const view = (id) => ({ id, account_id: 9, message_id: "abc@x", references: [], reply_to: [], subject: "RE: Tax Invoice - INV0000146",
-    from: ["Monica <monica@euroappliances.co.za>"], to: ["graeme@oxydev.co.za"], cc: ["accounts@euroappliances.co.za", "someone.else.with.a.long.address@example.com"],
-    date: now - 3600, html: "<p>Hi Graeme,</p>" + "<p>Please find attached the updated invoice. ".repeat(4) + "</p>".repeat(1) + Array.from({ length: 40 }, (_, i) => `<p>Line ${i + 1} of a long email body to test scrolling.</p>`).join("") + '<table width="900" border="1"><tr><td>Wide table cell</td><td>Another cell that is wide</td></tr></table>',
+    from: ["Monica <monica@euroappliances.co.za>"], to: ["jane@oxydev.co.za"], cc: ["accounts@euroappliances.co.za", "someone.else.with.a.long.address@example.com"],
+    date: now - 3600, html: "<p>Hi Jane,</p>" + "<p>Please find attached the updated invoice. ".repeat(4) + "</p>".repeat(1) + Array.from({ length: 40 }, (_, i) => `<p>Line ${i + 1} of a long email body to test scrolling.</p>`).join("") + '<table width="900" border="1"><tr><td>Wide table cell</td><td>Another cell that is wide</td></tr></table>',
     text: null, attachments: [{ index: 0, name: "Invoice-0000146.pdf", content_type: "application/pdf", size: 81234 }, { index: 1, name: "Statement September 2026 with a very long file name.xlsx", content_type: "application/vnd", size: 22111 }],
     notices: ["Attachment not available: SWIFT_PO#110026171505.zip (4533 bytes)"],
     from_addr: "monica@euroappliances.co.za", has_remote_content: true, images_allowed: false,
@@ -45,15 +45,15 @@ const mock = () => {
   const settings = { theme: window.__THEME__ ?? "system", density: "comfortable", mark_read_on_open: "true" };
   const handlers = {
     accounts: () => accounts, folders: ({ accountId }) => folders(accountId), messages: ({ folderId, offset }) => (offset ? [] : msgs(folderId)),
-    message: ({ id }) => view(id), settings: () => settings, set_setting: () => null, data_location: () => "/home/graeme/.local/share/oxymail/oxymail.db",
+    message: ({ id }) => view(id), settings: () => settings, set_setting: () => null, data_location: () => "/home/jane/.local/share/oxymail/oxymail.db",
     search: () => [], set_flag: () => null,
     move_to_folder: (args) => { (window.__calls ??= []).push(["move_to_folder", args]); return null; },
-    live_config: () => ({ email: "graeme@oxydev.co.za", username: "graeme@oxydev.co.za", source: "the provider's autoconfig", oauth: null,
+    live_config: () => ({ email: "jane@oxydev.co.za", username: "jane@oxydev.co.za", source: "the provider's autoconfig", oauth: null,
       imap: { host: "mail.oxydev.co.za", port: 993, security: "tls" }, smtp: { host: "mail.oxydev.co.za", port: 465, security: "tls" } }),
     messages_by_role: () => msgs(100).map((m, k) => ({ ...m, account_id: (k % 6) + 1 })),
     suggest_contacts: () => [{ email: "paul@sarongi.co.za", name: "Paul McCree" }, { email: "plarkin@topfiremedia.com", name: "Paul Larkin" }, { email: "paul.another@example.com", name: null }],
     thread: ({ id }) => [
-      { id: 900001, folder_id: 102, folder_name: "Sent", account_id: 1, date: now - 90000, from_name: "Graeme Bosworth", subject: "Tax Invoice - INV0000146", snippet: "", unread: false, starred: false, attachments: 0 },
+      { id: 900001, folder_id: 102, folder_name: "Sent", account_id: 1, date: now - 90000, from_name: "Jane Smith", subject: "Tax Invoice - INV0000146", snippet: "", unread: false, starred: false, attachments: 0 },
       { id, folder_id: 100, folder_name: "Inbox", account_id: 1, date: now - 3600, from_name: "Monica from Euro Appliances", subject: "RE: Tax Invoice - INV0000146", snippet: "", unread: false, starred: false, attachments: 1 },
     ],
     snoozed: () => msgs(100).slice(0, 3).map((m, k) => ({ ...m, snoozed_until: now + (k + 1) * 86400 })),
@@ -75,16 +75,16 @@ const mock = () => {
         ev(3, 1, "#0e7490", "TFM x Konala: Weekly Check-In", day(0, 13), day(0, 14), false, true),
         ev(4, 2, "#7c3aed", "Swimming lessons", day(0, 17), day(0, 18), false, true),
         ev(5, 1, "#0e7490", "Bay Solar proposal review", day(1, 10), day(1, 11)),
-        ev(6, 2, "#7c3aed", "Dinner with the Bosworths", day(2, 19), day(2, 21)),
+        ev(6, 2, "#7c3aed", "Dinner with the Smiths", day(2, 19), day(2, 21)),
         ev(7, 1, "#0e7490", "Invoice run", day(-2, 8), day(-2, 9)),
         ev(8, 1, "#0e7490", "Another meeting", day(0, 15), day(0, 16)),
       ];
     },
-    event: ({ id }) => ({ id, calendar_id: 1, summary: "Weekly Web Team Huddle", description: "Agenda in the shared doc.", location: "Teams", start: 0, end: 1800, all_day: false, rrule: "RRULE:FREQ=WEEKLY;BYDAY=TU", organizer: "Darin Halford <darin@halffull.com>", attendees: [{ name: "Graeme Bosworth", email: "g@x", status: "ACCEPTED" }, { name: null, email: "team@halffull.com", status: "NEEDS-ACTION" }], status: null }),
+    event: ({ id }) => ({ id, calendar_id: 1, summary: "Weekly Web Team Huddle", description: "Agenda in the shared doc.", location: "Teams", start: 0, end: 1800, all_day: false, rrule: "RRULE:FREQ=WEEKLY;BYDAY=TU", organizer: "Darin Halford <darin@halffull.com>", attendees: [{ name: "Jane Smith", email: "g@x", status: "ACCEPTED" }, { name: null, email: "team@halffull.com", status: "NEEDS-ACTION" }], status: null }),
     people: () => [
       { id: 1, full_name: "Paul McCree", org: "Sarongi", email: "paul@sarongi.co.za", phone: "082-575-6646", photo: null },
       { id: 2, full_name: "Louise Van Loggerenberg", org: null, email: null, phone: "082-857-7465", photo: null },
-      { id: 3, full_name: "Megan Bosworth", org: null, email: null, phone: "072-461-2141", photo: null },
+      { id: 3, full_name: "Megan Smith", org: null, email: null, phone: "072-461-2141", photo: null },
       { id: 4, full_name: "Monica Venter", org: "Euro Appliances", email: "monica@euroappliances.co.za", phone: null, photo: null },
     ],
     person: () => ({ id: 1, full_name: "Paul McCree", first_name: "Paul", last_name: "McCree", org: "Sarongi", title: "Director", notes: "Met at the Cape Town expo.", birthday: "1981-01-19", photo: null, groups: "Clients", fields: [{ kind: "email", label: "Home", value: "paul@sarongi.co.za" }, { kind: "phone", label: "Mobile", value: "082-575-6646" }, { kind: "url", label: "Home Page", value: "https://sarongi.co.za" }] }),
@@ -122,7 +122,7 @@ const shots = [
   ["settings-900", 900, 600, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")'); }],
   ["edit-live-account", 1360, 860, "dark", async (p) => {
     await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Accounts")');
-    await p.locator(".accounts li", { hasText: "graeme@oxydev.co.za" }).locator("button.edit").click();
+    await p.locator(".accounts li", { hasText: "jane@oxydev.co.za" }).locator("button.edit").click();
     await p.waitForTimeout(200); await p.locator(".content").evaluate((el) => (el.scrollTop = 520));
   }],
   ["connect-archive", 1360, 860, "dark", async (p) => {
