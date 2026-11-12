@@ -871,14 +871,14 @@ mod tests {
         let vcf = dir.join("people.vcf");
         fs::write(
             &vcf,
-            "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Paul McCree\r\nN:McCree;Paul;;;\r\nEMAIL;TYPE=INTERNET;TYPE=HOME:paul@sarongi.co.za\r\n\
-             TEL;TYPE=CELL:082 575 6646\r\nORG:Sarongi\r\nEND:VCARD\r\n",
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Peter Mabaso\r\nN:Mabaso;Peter;;;\r\nEMAIL;TYPE=INTERNET;TYPE=HOME:peter@riverbend.example\r\n\
+             TEL;TYPE=CELL:082 555 0101\r\nORG:Riverbend\r\nEND:VCARD\r\n",
         )?;
         assert_eq!(store.import_vcf(&vcf)?, 1);
         assert_eq!(store.import_vcf(&vcf)?, 0, "no duplicates");
-        let found = store.people("sarongi")?;
-        assert_eq!(found[0].full_name, "Paul McCree");
-        assert_eq!(found[0].email.as_deref(), Some("paul@sarongi.co.za"));
+        let found = store.people("riverbend")?;
+        assert_eq!(found[0].full_name, "Peter Mabaso");
+        assert_eq!(found[0].email.as_deref(), Some("peter@riverbend.example"));
         let p = store.person(found[0].id)?;
         assert_eq!(p.fields.iter().find(|f| f.kind == "phone").and_then(|f| f.label.clone()).as_deref(), Some("Cell"));
         drop(store); // Windows won't delete a database that is still open.

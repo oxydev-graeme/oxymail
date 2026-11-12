@@ -1612,8 +1612,8 @@ mod tests {
 
     #[test]
     fn search_filters_split_into_fts_and_conditions() {
-        let q = parse_search(r#"from:monica has:attachment "tax invoice" is:unread before:2025-01-01"#);
-        assert_eq!(q.fts, r#"sender : "monica"* "tax invoice"*"#);
+        let q = parse_search(r#"from:maria has:attachment "tax invoice" is:unread before:2025-01-01"#);
+        assert_eq!(q.fts, r#"sender : "maria"* "tax invoice"*"#);
         assert_eq!(q.conditions.len(), 3);
         assert!(parse_search("is:starred").fts.is_empty());
     }
