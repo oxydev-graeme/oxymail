@@ -34,7 +34,9 @@ const mock = () => {
     date: now - k * 7200, important: k % 3 === 0, from_name: ["Maria from Coastline Appliances", "Asana", "Larkspur Studio", "Daniel Hart", "Google Workspace"][k % 5], from_addr: "x@example.com",
     subject: ["RE: Tax Invoice - INV0000123 for the period ending September and the rest of a long subject line", "New comment on Home page [Final Revisions]", "INV-00042 invoice viewed", "Sunridge Solar rebuild — next steps", "Security alert"][k % 5],
     snippet: "Hi Jane, please find attached the updated invoice as discussed on our call this morning. Let me know if anything needs changing before month end.",
-    unread: k % 3 === 0, starred: k % 7 === 0, attachments: k % 4 === 0 ? 2 : 0 }));
+    unread: k % 3 === 0, starred: k % 7 === 0, attachments: k % 4 === 0 ? 2 : 0,
+    // Every message shares a conversation with the ones 5 and 10 rows further down.
+    thread_key: `t${k % 15}` }));
   const view = (id) => ({ id, account_id: 9, message_id: "abc@x", references: [], reply_to: [], subject: "RE: Tax Invoice - INV0000123",
     from: ["Maria <maria@coastline-appliances.example>"], to: ["jane@larkspur.example"], cc: ["accounts@coastline-appliances.example", "someone.else.with.a.long.address@example.com"],
     date: now - 3600, html: "<p>Hi Jane,</p>" + "<p>Please find attached the updated invoice. ".repeat(4) + "</p>".repeat(1) + Array.from({ length: 40 }, (_, i) => `<p>Line ${i + 1} of a long email body to test scrolling.</p>`).join("") + '<table width="900" border="1"><tr><td>Wide table cell</td><td>Another cell that is wide</td></tr></table>',
@@ -42,7 +44,7 @@ const mock = () => {
     notices: ["Attachment not available: SWIFT_PO#000000000000.zip (4533 bytes)"],
     from_addr: "maria@coastline-appliances.example", has_remote_content: true, images_allowed: false,
     unsubscribe: ["https://example.com/unsubscribe"] });
-  const settings = { theme: window.__THEME__ ?? "system", density: "comfortable", mark_read_on_open: "true" };
+  const settings = { theme: window.__THEME__ ?? "system", density: "comfortable", mark_read_on_open: "true", ...(window.__SETTINGS__ ?? {}) };
   const handlers = {
     accounts: () => accounts, folders: ({ accountId }) => folders(accountId), messages: ({ folderId, offset }) => (offset ? [] : msgs(folderId)),
     message: ({ id }) => view(id), settings: () => settings, set_setting: () => null, data_location: () => "/home/jane/.local/share/oxymail/oxymail.db",
@@ -58,6 +60,7 @@ const mock = () => {
       { id: 4, account_id: null, field: "from", value: "newsletter@", action: "read", enabled: false },
     ],
     autostart: () => true,
+    save_filter: () => 5, run_filter: () => 4,
     suggest_contacts: () => [{ email: "peter@riverbend.example", name: "Peter Mabaso" }, { email: "plang@meridian.example", name: "Peter Lang" }, { email: "peter.another@example.com", name: null }],
     thread: ({ id }) => [
       { id: 900001, folder_id: 102, folder_name: "Sent", account_id: 1, date: now - 90000, from_name: "Jane Smith", subject: "Tax Invoice - INV0000123", snippet: "", unread: false, starred: false, attachments: 0 },
@@ -164,6 +167,20 @@ const shots = [
   ["settings-composing", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Composing")'); }],
   ["settings-snoozing", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Snoozing")'); }],
   ["settings-appearance", 1360, 860, "light", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Appearance")'); }],
+  ["reader-spam-filter", 1360, 860, "dark", async (p) => { await p.click(".row-main"); }],
+  ["filter-from-message", 1360, 860, "dark", async (p) => { await p.click(".row-main"); await p.click(".toolbar button:has-text('Filter')"); }],
+  ["filters-run-now", 1360, 860, "dark", async (p) => {
+    await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Filters")');
+    await p.locator(".filter").first().locator("button:has-text('Run now')").click(); await p.waitForTimeout(200);
+  }],
+  ["conversations", 1360, 860, "dark", async (p) => { await p.click(".row-main"); }, { group_conversations: "true" }],
+  ["reading-pane-below", 1360, 860, "dark", async (p) => { await p.click(".row-main"); }, { reading_pane: "below" }],
+  ["reading-pane-below-resized", 1360, 860, "light", async (p) => {
+    await p.click(".row-main");
+    const y = await p.locator(".list-pane").evaluate((el) => el.getBoundingClientRect().bottom);
+    await p.mouse.move(800, y); await p.mouse.down(); await p.mouse.move(800, y - 150, { steps: 4 });
+  }, { reading_pane: "below" }],
+  ["settings-appearance-pane", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Appearance")'); }],
   ["multi-select", 1360, 860, "dark", async (p) => {
     const rows = p.locator(".row-main");
     await rows.nth(0).click(); await rows.nth(2).click({ modifiers: ["Control"] }); await rows.nth(4).click({ modifiers: ["Control"] });
@@ -212,9 +229,9 @@ const shots = [
   }],
   ["compose-maximized", 1360, 860, "dark", async (p) => { await p.click(".compose-btn"); await p.click(".compose header button[title='Maximise']"); }],
 ];
-for (const [name, w, h, theme, act] of shots) {
+for (const [name, w, h, theme, act, extra] of shots) {
   const page = await browser.newPage({ viewport: { width: w, height: h }, colorScheme: theme });
-  await page.addInitScript(`window.__THEME__=${JSON.stringify(theme)};(${mock.toString()})()`);
+  await page.addInitScript(`window.__THEME__=${JSON.stringify(theme)};window.__SETTINGS__=${JSON.stringify(extra ?? {})};(${mock.toString()})()`);
   page.on("pageerror", (e) => console.log(name, "PAGE ERROR", e.message));
   await page.goto("http://localhost:4317/");
   await page.waitForSelector(".row-main");
@@ -224,7 +241,7 @@ for (const [name, w, h, theme, act] of shots) {
   const report = await page.evaluate(() => {
     const out = [];
     if (document.documentElement.scrollWidth > innerWidth) out.push(`page overflows horizontally by ${document.documentElement.scrollWidth - innerWidth}px`);
-    for (const sel of [".sidebar", ".list", ".content"]) {
+    for (const sel of [".sidebar", ".list-pane .list", ".content"]) {
       const el = document.querySelector(sel);
       if (el) out.push(`${sel}: client ${el.clientHeight} / scroll ${el.scrollHeight} / scrollTop ${el.scrollTop}`);
     }

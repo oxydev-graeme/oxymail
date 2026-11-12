@@ -156,11 +156,10 @@ pub async fn sign_in(provider_id: &str, email: &str) -> Result<String> {
 
 /// A current access token for `email`, renewing it with the stored refresh token if needed.
 pub async fn access_token(provider_id: &str, email: &str) -> Result<String> {
-    if let Some((token, expires)) = ACCESS.lock().ok().and_then(|a| a.get(email).cloned()) {
-        if Instant::now() + Duration::from_secs(60) < expires {
+    if let Some((token, expires)) = ACCESS.lock().ok().and_then(|a| a.get(email).cloned())
+        && Instant::now() + Duration::from_secs(60) < expires {
             return Ok(token);
         }
-    }
     let provider = provider(provider_id)?;
     let client = client(provider)?;
     let refresh = secrets::refresh_token(email)?;

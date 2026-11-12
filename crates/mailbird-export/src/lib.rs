@@ -527,11 +527,10 @@ fn export_mail(
         if let Some(unsub) = list_unsubscribe {
             builder = builder.header("List-Unsubscribe", Raw::new(unsub));
         }
-        if account_identity == 1 {
-            if let Some(thread) = thread_id {
+        if account_identity == 1
+            && let Some(thread) = thread_id {
                 builder = builder.header("X-GM-THRID", Raw::new(thread));
             }
-        }
         let labels: Vec<&str> = my_folders.iter().map(|f| f.name.as_str()).collect();
         if !labels.is_empty() {
             builder = builder.header("X-OxyMail-Folders", Text::new(labels.join(", ")));
@@ -586,7 +585,7 @@ fn export_mail(
         }
 
         done += 1;
-        if done % 500 == 0 {
+        if done.is_multiple_of(500) {
             progress(Progress { done, total });
         }
     }

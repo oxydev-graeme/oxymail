@@ -10,6 +10,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 mod badge;
 mod desktop;
+#[cfg(target_os = "macos")]
+mod macos_shell;
+#[cfg(target_os = "windows")]
+mod windows_shell;
 mod live;
 
 pub(crate) struct AppState(Mutex<Store>);
@@ -443,6 +447,7 @@ fn main() {
     live::load_oauth_clients(&store);
     let args: Vec<String> = std::env::args().collect();
     desktop::queue_mailto(desktop::mailto_args(&args));
+    desktop::refresh_mail_client_registration();
     tauri::Builder::default()
         // First, so a second launch hands over to this one before anything else starts.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| desktop::second_instance(app, args)))
@@ -564,6 +569,7 @@ fn main() {
             live::oauth_clients,
             live::set_oauth_client,
             desktop::take_mailto,
+            live::run_filter,
             filters,
             save_filter,
             delete_filter,
@@ -583,8 +589,11 @@ fn main() {
         .run(|_app, _event| {
             // macOS: clicking the dock icon brings back a window closed to the tray.
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = _event {
-                desktop::show_main(_app);
+            match _event {
+                tauri::RunEvent::Reopen { .. } => desktop::show_main(_app),
+                // A mailto: link clicked in another app.
+                tauri::RunEvent::Opened { urls } => desktop::open_urls(_app, urls.iter().map(|u| u.to_string()).collect()),
+                _ => {}
             }
         });
 }

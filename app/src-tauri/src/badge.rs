@@ -5,8 +5,9 @@
 //!
 //! Some Linux panels (Zorin Taskbar, Dash to Panel) also count an app's notifications that are
 //! still in the message tray, so a notification for mail since read on a phone would keep a
-//! number on the icon. On Linux, notifications are therefore sent here, where their ids are
-//! kept, and withdrawn once every message they announced is read.
+//! number on the icon; Windows keeps them in the Action Center. On both, notifications are
+//! therefore sent here, where their ids are kept, and withdrawn once every message they
+//! announced is read. (macOS's Notification Center can't be cleared this way yet.)
 
 use oxymail_core::Store;
 use tauri::AppHandle;
@@ -15,8 +16,8 @@ use tauri::AppHandle;
 /// Cheap enough to run after every sync, every flag change and on the 30-second tick, which
 /// also restores a badge a panel cleared when the window was focused.
 pub fn refresh(app: &AppHandle, store: &Store) {
-    #[cfg(target_os = "linux")]
-    linux::withdraw_read(store);
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    withdraw_read(store);
     // "Show the unread count on the taskbar and tray icon", on unless turned off.
     let shown = store.settings().ok().and_then(|s| s.get("unread_badge").cloned()).as_deref() != Some("false");
     let count = if shown { store.inbox_unread().unwrap_or(0) } else { 0 };
@@ -32,7 +33,15 @@ pub fn notify_new_mail(app: &AppHandle, title: String, body: String, ids: Vec<i6
         let _ = app;
         tauri::async_runtime::spawn(linux::notify(title, body, ids, sound));
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        let app_id = WINDOWS_APP_ID.get_or_init(|| crate::windows_shell::toast_app_id(&app.config().identifier));
+        let tag = NEXT_TAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if crate::windows_shell::show_toast(app_id, &tag.to_string(), &title, &body, sound).is_ok() {
+            remember(tag, ids);
+        }
+    }
+    #[cfg(target_os = "macos")]
     {
         use tauri_plugin_notification::NotificationExt;
         let _ = ids;
@@ -43,6 +52,55 @@ pub fn notify_new_mail(app: &AppHandle, title: String, body: String, ids: Vec<i6
         let _ = builder.show();
     }
 }
+
+/// Notifications on screen or in the tray / Action Center: their id and the messages each
+/// announces.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+static SHOWN: std::sync::Mutex<Vec<(u32, Vec<i64>)>> = std::sync::Mutex::new(Vec::new());
+
+/// Windows toast tags, numbered from the start of this run.
+#[cfg(target_os = "windows")]
+static NEXT_TAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn remember(id: u32, ids: Vec<i64>) {
+    if let Ok(mut shown) = SHOWN.lock() {
+        shown.push((id, ids));
+    }
+}
+
+/// Withdraws every notification whose messages have all been read (here or anywhere else).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn withdraw_read(store: &Store) {
+    let read: Vec<u32> = {
+        let Ok(mut shown) = SHOWN.lock() else { return };
+        let mut read = Vec::new();
+        shown.retain(|(id, ids)| {
+            let unread = store.any_unread(ids).unwrap_or(true);
+            if !unread {
+                read.push(*id);
+            }
+            unread
+        });
+        read
+    };
+    if read.is_empty() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    tauri::async_runtime::spawn(linux::close(read));
+    #[cfg(target_os = "windows")]
+    if let Some(app_id) = WINDOWS_APP_ID.get() {
+        for tag in read {
+            // Harmless for one the user already dismissed.
+            let _ = crate::windows_shell::remove_toast(app_id, &tag.to_string());
+        }
+    }
+}
+
+/// Set on the first toast, for withdrawing them later.
+#[cfg(target_os = "windows")]
+static WINDOWS_APP_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 #[cfg(target_os = "linux")]
 fn set_count(_app: &AppHandle, count: i64) {
@@ -78,7 +136,6 @@ mod linux {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use oxymail_core::Store;
     use zbus::zvariant::Value;
 
     /// Must match the installed `oxymail.desktop`, which is how the panel finds our icon.
@@ -90,9 +147,6 @@ mod linux {
 
     /// Kept open for the life of the app: docks drop the badge when the sender disconnects.
     static CONNECTION: Mutex<Option<zbus::Connection>> = Mutex::new(None);
-    /// Notifications on screen or in the tray: server id and the messages each announces.
-    static SHOWN: Mutex<Vec<(u32, Vec<i64>)>> = Mutex::new(Vec::new());
-
     async fn connection() -> zbus::Result<zbus::Connection> {
         if let Some(c) = CONNECTION.lock().ok().and_then(|c| c.clone()) {
             return Ok(c);
@@ -137,36 +191,16 @@ mod linux {
             )
             .await;
         let Ok(id) = reply.and_then(|r| r.body().deserialize::<u32>()) else { return };
-        if let Ok(mut shown) = SHOWN.lock() {
-            shown.push((id, ids));
-        }
+        super::remember(id, ids);
     }
 
-    /// Closes every notification whose messages have all been read (here or anywhere else).
-    pub fn withdraw_read(store: &Store) {
-        let read: Vec<u32> = {
-            let Ok(mut shown) = SHOWN.lock() else { return };
-            let mut read = Vec::new();
-            shown.retain(|(id, ids)| {
-                let unread = store.any_unread(ids).unwrap_or(true);
-                if !unread {
-                    read.push(*id);
-                }
-                unread
-            });
-            read
-        };
-        if read.is_empty() {
-            return;
+    pub async fn close(ids: Vec<u32>) {
+        let Ok(connection) = connection().await else { return };
+        let (destination, path, interface) = NOTIFICATIONS;
+        for id in ids {
+            // Harmless for one the user already dismissed.
+            let _ = connection.call_method(Some(destination), path, Some(interface), "CloseNotification", &(id,)).await;
         }
-        tauri::async_runtime::spawn(async move {
-            let Ok(connection) = connection().await else { return };
-            let (destination, path, interface) = NOTIFICATIONS;
-            for id in read {
-                // Harmless for one the user already dismissed.
-                let _ = connection.call_method(Some(destination), path, Some(interface), "CloseNotification", &(id,)).await;
-            }
-        });
     }
 }
 

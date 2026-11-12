@@ -17,6 +17,10 @@
   let mailbirdPath = $state("");
   let importing = $state(false);
   let importResult = $state("");
+  /** Also run a new filter on the mail already in an Inbox. */
+  let applyExisting = $state(true);
+  /** filter id → what "Run now" did, or "running". */
+  let ran = $state({});
 
   const live = $derived(accounts.filter((a) => a.kind === "imap"));
   const accountName = (id) => (id == null ? "All accounts" : accountLabel(accounts.find((a) => a.id === id) ?? { name: "Removed account" }));
@@ -30,20 +34,34 @@
   }
   onMount(load);
 
+  /** Saves a filter; resolves to its id, or null when it couldn't be saved. */
   async function save(f) {
     error = "";
     try {
-      await api.saveFilter($state.snapshot(f));
+      const id = await api.saveFilter($state.snapshot(f));
       await load();
-      return true;
+      return id;
     } catch (e) {
       error = String(e);
-      return false;
+      return null;
     }
   }
 
   async function add() {
-    if (await save(draft)) draft = blank();
+    const id = await save(draft);
+    if (id == null) return;
+    draft = blank();
+    if (applyExisting) run({ id });
+  }
+
+  async function run(f) {
+    ran[f.id] = "running";
+    try {
+      const n = await api.runFilter(f.id);
+      ran[f.id] = n === 0 ? "Nothing in an Inbox matched." : `Applied to ${n} message${n === 1 ? "" : "s"}.`;
+    } catch (e) {
+      ran[f.id] = `Couldn't run it: ${e}`;
+    }
   }
 
   async function remove(f) {
@@ -74,7 +92,7 @@
 <h2>Filters</h2>
 <p class="hint lead">
   Run on new mail as it arrives in an Inbox, from the top down; the first that matches decides. Text matches anywhere, in
-  any case, and <kbd>*</kbd> stands for anything. Mail a filter moves away or marks read gets no notification.
+  any case, and <kbd>*</kbd> stands for anything. Mail a filter moves away or marks read gets no notification. “Run now” applies a filter to mail already in your Inboxes.
 </p>
 
 <div class="list">
@@ -84,7 +102,11 @@
       <div class="what">
         <div><span class="muted">{FIELDS.find(([v]) => v === f.field)?.[1]} contains</span> <b>{f.value}</b></div>
         <div class="muted">→ {ACTIONS.find(([v]) => v === f.action)?.[1]} · {accountName(f.account_id)}</div>
+        {#if ran[f.id] && ran[f.id] !== "running"}<div class="ran">{ran[f.id]}</div>{/if}
       </div>
+      <button class="run" title="Run this filter on the mail already in your Inboxes" disabled={ran[f.id] === "running" || !f.enabled} onclick={() => run(f)}>
+        {ran[f.id] === "running" ? "Running…" : "Run now"}
+      </button>
       <button class="icon" title="Delete this filter" onclick={() => remove(f)}><Icon name="trash" size={15} /></button>
     </div>
   {:else}
@@ -108,6 +130,7 @@
     </select>
     <button class="primary" onclick={add} disabled={!draft.value.trim()}>Add</button>
   </div>
+  <label class="check"><input type="checkbox" bind:checked={applyExisting} /> Also apply it to mail already in an Inbox</label>
   {#if error}<p class="error">{error}</p>{/if}
 </div>
 
@@ -124,7 +147,7 @@
 
 <style>
   h2 { margin: 0 0 18px; font-size: 17px; }
-  .lead { margin: -6px 0 16px; }
+  .hint.lead { margin: -6px 0 16px; }
   .list { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 10px; max-height: 300px; overflow-y: auto; }
   .filter { display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
   .filter:last-child { border-bottom: 0; }
@@ -145,6 +168,12 @@
   .primary:disabled { opacity: 0.5; }
   .hint { margin: 6px 0 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
   .result { font-size: 13px; margin: 8px 0 0; }
+  .ran { font-size: 12px; color: var(--accent); }
+  .run { padding: 4px 10px !important; font-size: 12px !important; color: var(--muted); }
+  .run:hover:not(:disabled) { color: var(--text); background: var(--hover); }
+  .run:disabled { opacity: 0.5; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .check input { width: 15px; height: 15px; accent-color: var(--accent); }
   .error { color: var(--danger); font-size: 13px; margin: 4px 0 0; }
   kbd { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; font-size: 11px; }
 </style>

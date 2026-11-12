@@ -43,11 +43,22 @@
     isDefault = await api.defaultMailApp().catch(() => null);
   });
 
+  // Back from the system's Default apps page: see whether OxyMail was chosen.
+  $effect(() => {
+    const recheck = async () => {
+      if (pickInSystem) isDefault = await api.defaultMailApp().catch(() => isDefault);
+    };
+    window.addEventListener("focus", recheck);
+    return () => window.removeEventListener("focus", recheck);
+  });
+
   /** true, false, or null where OxyMail can't tell (the option is then hidden). */
   let isDefault = $state(null);
+  /** Windows only lets the user pick a default app, in its own Settings window. */
+  let pickInSystem = $state(false);
   async function makeDefault() {
     try {
-      await api.makeDefaultMailApp();
+      pickInSystem = !(await api.makeDefaultMailApp());
       isDefault = await api.defaultMailApp();
     } catch (e) {
       alertText = `Couldn't make OxyMail the default: ${e}`;
@@ -87,6 +98,7 @@
     ["↓ / j", "Next message"],
     ["↑ / k", "Previous message"],
     ["e", "Archive"],
+    ["!", "Spam (in Spam: not spam)"],
     ["Delete / #", "Delete (move to Trash)"],
     ["s", "Star or unstar"],
     ["u", "Mark read or unread"],
@@ -159,7 +171,11 @@
               <p class="hint">OxyMail opens email links (mailto:) from your browser and other apps.</p>
             {:else}
               <div class="row"><button class="primary" onclick={makeDefault}>Make OxyMail the default</button></div>
-              <p class="hint">So email links in your browser and other apps open a new message here.</p>
+              {#if pickInSystem}
+                <p class="hint">In the Settings window that opened, choose OxyMail for email links (MAILTO).</p>
+              {:else}
+                <p class="hint">So email links in your browser and other apps open a new message here.</p>
+              {/if}
             {/if}
           </div>
         {/if}
@@ -220,7 +236,16 @@
           <p class="hint">Only the messages you read, on top of the text size above.</p>
         </div>
         <div class="field">
-          <div class="label">Column widths</div>
+          <div class="label">Reading pane</div>
+          <div class="segmented">
+            {#each [["right", "Beside the list"], ["below", "Below the list"]] as [value, label]}
+              <button class:on={(settings.reading_pane || "right") === value} onclick={() => onchange("reading_pane", value)}>{label}</button>
+            {/each}
+          </div>
+          <p class="hint">Below gives long subjects and wide emails more room.</p>
+        </div>
+        <div class="field">
+          <div class="label">Column sizes</div>
           <p class="hint">Drag the borders between the sidebar, the message list and the reader. Double-click a border to put it back.</p>
         </div>
       {:else if section === "reading"}
@@ -238,6 +263,11 @@
           <input type="checkbox" checked={on("select_next")} onchange={toggle("select_next")} />
           <span>Open the next message after archiving, deleting or moving one</span>
         </label>
+        <label class="toggle">
+          <input type="checkbox" checked={settings.group_conversations === "true"} onchange={toggle("group_conversations")} />
+          <span>Group messages into conversations</span>
+        </label>
+        <p class="hint push">One row per conversation in each folder, showing the newest message and how many there are. Archiving, deleting, moving or snoozing it does the same to all of them.</p>
         <div class="field">
           <div class="label">Undo send</div>
           <div class="segmented">

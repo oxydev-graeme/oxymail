@@ -12,7 +12,30 @@ permissions:
   contents: write
 
 jobs:
+  # One release, made before the builds start: when each build made its own, two that finished
+  # together could each create a "v1.2.3" release and split the files (and latest.json) between them.
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      id: ${{ steps.make.outputs.id }}
+    steps:
+      - id: make
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          BODY: |
+            **Windows:** run `OxyMail_*_x64-setup.exe` (no administrator rights needed), or use the `.msi`.
+            **macOS:** open the `.dmg` and drag OxyMail to Applications. The first time, right-click → Open.
+            **Linux:** the AppImage (make it executable, then run it), the `.deb` (`sudo apt install ./OxyMail_*.deb`), or the `.rpm`.
+
+            Installed copies update themselves.
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "OxyMail $TAG" --notes "$BODY"
+          echo "id=$(gh api "repos/$GH_REPO/releases/tags/$TAG" --jq .id)" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: release
     strategy:
       fail-fast: false
       matrix:
@@ -27,7 +50,7 @@ jobs:
             args: ""
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Linux system libraries
         if: runner.os == 'Linux'
@@ -36,7 +59,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
             libayatana-appindicator3-dev librsvg2-dev patchelf rpm
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -63,14 +86,5 @@ jobs:
         with:
           projectPath: app
           args: ${{ matrix.args }}
-          tagName: ${{ github.ref_name }}
-          releaseName: OxyMail ${{ github.ref_name }}
-          releaseBody: |
-            **Windows:** run `OxyMail_*_x64-setup.exe` (no administrator rights needed), or use the `.msi`.
-            **macOS:** open the `.dmg` and drag OxyMail to Applications. The first time, right-click → Open.
-            **Linux:** the AppImage (make it executable, then run it), the `.deb` (`sudo apt install ./OxyMail_*.deb`), or the `.rpm`.
-
-            Installed copies update themselves.
-          releaseDraft: false
-          prerelease: false
+          releaseId: ${{ needs.release.outputs.id }}
           includeUpdaterJson: true

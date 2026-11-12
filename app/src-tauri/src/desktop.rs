@@ -28,8 +28,12 @@ pub fn queue_mailto(links: Vec<String>) {
     }
 }
 
+/// Set once the UI has asked for pending links, after which new ones are sent to it directly.
+static UI_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[tauri::command]
 pub fn take_mailto() -> Vec<String> {
+    UI_READY.store(true, std::sync::atomic::Ordering::Relaxed);
     PENDING_MAILTO.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default()
 }
 
@@ -139,10 +143,10 @@ pub fn start_hidden(state: &State<AppState>, args: &[String]) -> bool {
             != Some("false")
 }
 
-/// Whether OxyMail opens `mailto:` links, or `None` where it can't tell or change that itself.
-/// Only Linux for now: Windows and macOS want the app registered as a mail client first.
+/// Whether OxyMail opens `mailto:` links, or `None` where it can't tell.
 #[tauri::command]
-pub fn default_mail_app() -> Option<bool> {
+pub fn default_mail_app(app: AppHandle) -> Option<bool> {
+    let _ = &app;
     #[cfg(target_os = "linux")]
     {
         let out = std::process::Command::new("xdg-settings")
@@ -151,20 +155,68 @@ pub fn default_mail_app() -> Option<bool> {
             .ok()?;
         out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim() == "yes")
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    return Some(crate::windows_shell::is_default_mail_app());
+    #[cfg(target_os = "macos")]
+    return Some(crate::macos_shell::is_default_mail_app(&app.config().identifier));
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     None
 }
 
+/// Makes OxyMail the app for `mailto:` links. Returns `false` when the system only lets the
+/// user make that choice (Windows), in which case its settings page is now open for them.
 #[tauri::command]
-pub fn make_default_mail_app() -> Res<()> {
+pub fn make_default_mail_app(app: AppHandle) -> Res<bool> {
+    let _ = &app;
     #[cfg(target_os = "linux")]
     {
         let status = std::process::Command::new("xdg-settings")
             .args(["set", "default-url-scheme-handler", "mailto", "oxymail.desktop"])
             .status()
             .map_err(err)?;
-        if status.success() { Ok(()) } else { Err("the desktop didn't accept the change".into()) }
+        if status.success() { Ok(true) } else { Err("the desktop didn't accept the change".into()) }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        let exe = std::env::current_exe().map_err(err)?;
+        crate::windows_shell::register_mail_client(&exe.to_string_lossy()).map_err(err)?;
+        open::that_detached(crate::windows_shell::DEFAULT_APPS_PAGE).map_err(err)?;
+        Ok(false)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos_shell::make_default_mail_app(&app.config().identifier)?;
+        Ok(true)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     Err("not available on this system yet".into())
+}
+
+/// Windows: once registered as an email app, keep the registered program path current (an
+/// update or a move would otherwise leave email links pointing at the old one).
+pub fn refresh_mail_client_registration() {
+    #[cfg(target_os = "windows")]
+    if crate::windows_shell::mail_client_registered()
+        && let Ok(exe) = std::env::current_exe()
+    {
+        let _ = crate::windows_shell::register_mail_client(&exe.to_string_lossy());
+    }
+}
+
+/// macOS hands `mailto:` links to the running app as an event, not on the command line.
+#[cfg(target_os = "macos")]
+pub fn open_urls(app: &AppHandle, urls: Vec<String>) {
+    let links = mailto_args(&urls);
+    if links.is_empty() {
+        return;
+    }
+    if UI_READY.load(std::sync::atomic::Ordering::Relaxed) {
+        show_main(app);
+        for link in links {
+            let _ = app.emit("compose-mailto", link);
+        }
+    } else {
+        // Launched by the link: the UI collects it once it has loaded.
+        queue_mailto(links);
+    }
 }

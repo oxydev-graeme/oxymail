@@ -1,4 +1,5 @@
 <script>
+  import { untrack } from "svelte";
   import Icon from "./Icon.svelte";
 
   /**
@@ -8,17 +9,19 @@
   let { title, onpick, onclose, settings = {} } = $props();
 
   const now = new Date();
+  // Read once: the menu is only open for a moment, and its choices shouldn't shift under the pointer.
+  const schedule = untrack(() => ({ ...settings }));
   const time = (key, fallback) => {
-    const [h, m] = String(settings[key] || fallback).split(":").map(Number);
+    const [h, m] = String(schedule[key] || fallback).split(":").map(Number);
     return [Number.isFinite(h) ? h : 8, Number.isFinite(m) ? m : 0];
   };
   const [dayH, dayM] = time("day_starts", "08:00");
   const [endH, endM] = time("workday_ends", "18:00");
   const [weekendH, weekendM] = time("weekend_starts", "09:00");
-  const weekendDay = Number(settings.weekend_starts_day ?? 6);
-  const weekDay = Number(settings.week_starts_day ?? 1);
-  const laterHours = Number(settings.later_today_hours) || 3;
-  const somedayMonths = Number(settings.someday_months) || 3;
+  const weekendDay = Number(schedule.weekend_starts_day ?? 6);
+  const weekDay = Number(schedule.week_starts_day ?? 1);
+  const laterHours = Number(schedule.later_today_hours) || 3;
+  const somedayMonths = Number(schedule.someday_months) || 3;
 
   const at = (days, hours, minutes = 0) => {
     const d = new Date(now);

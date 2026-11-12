@@ -10,6 +10,11 @@ use anyhow::Result;
 use base64::Engine;
 use rusqlite::Connection;
 
+/// A Mailbird filter row: condition field and kind, action and its target.
+type FilterRow = (Option<String>, Option<i64>, Option<String>, Option<i64>);
+/// An event attendee: name, address, response and whether they organise it.
+type Attendee = (Option<String>, String, i64, bool);
+
 #[derive(Debug, Default, serde::Serialize)]
 pub struct ExtrasStats {
     pub contacts: usize,
@@ -65,7 +70,7 @@ pub fn read_filters(db: &Connection) -> Result<(Vec<ExportedFilter>, usize)> {
     })?;
     // One condition and one action per filter is all Mailbird's editor makes; a filter with
     // more rows than that is skipped whole rather than half-applied.
-    let mut by_filter: std::collections::BTreeMap<i64, Vec<(Option<String>, Option<i64>, Option<String>, Option<i64>)>> =
+    let mut by_filter: std::collections::BTreeMap<i64, Vec<FilterRow>> =
         Default::default();
     for row in rows {
         let (id, account, condition, value, action) = row?;
@@ -248,7 +253,7 @@ fn calendars(db: &Connection, dir: &Path) -> Result<(usize, usize)> {
         let (event, rule) = row?;
         rules.entry(event).or_default().push(rule);
     }
-    let mut attendees: HashMap<i64, Vec<(Option<String>, String, i64, bool)>> = HashMap::new();
+    let mut attendees: HashMap<i64, Vec<Attendee>> = HashMap::new();
     for row in db
         .prepare("select EventId, Name, Email, ResponseStatus, Organizer from CalendarEventAttendees where Email is not null")?
         .query_map([], |r| {
@@ -305,11 +310,10 @@ fn calendars(db: &Connection, dir: &Path) -> Result<(usize, usize)> {
             let date = if whole_day { ";VALUE=DATE" } else { "" };
             line(&mut body, &format!("DTSTART{date}:{start}"));
             line(&mut body, &format!("DTEND{date}:{end}"));
-            if master.is_some() {
-                if let Some(original) = stamp(r.get(10)?, whole_day) {
+            if master.is_some()
+                && let Some(original) = stamp(r.get(10)?, whole_day) {
                     line(&mut body, &format!("RECURRENCE-ID{date}:{original}"));
                 }
-            }
             line(&mut body, &format!("SUMMARY:{}", esc(&r.get::<_, Option<String>>(1)?.unwrap_or_default())));
             for (key, column) in [("DESCRIPTION", 2), ("LOCATION", 3)] {
                 if let Some(text) = r.get::<_, Option<String>>(column)?.filter(|t| !t.trim().is_empty()) {

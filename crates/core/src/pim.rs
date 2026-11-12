@@ -172,6 +172,13 @@ pub struct PimImport {
     pub people: usize,
 }
 
+/// A calendar or vCard property's parameters (`TYPE=HOME`, `TZID=…`).
+type Params = HashMap<String, String>;
+/// An event's properties by name, each with its parameters and value.
+type IcsProps = HashMap<String, Vec<(Params, String)>>;
+/// One vCard line: name, parameters and value.
+type VcardLine = (String, Params, String);
+
 impl Store {
     // ---- Calendars -------------------------------------------------------------
 
@@ -390,16 +397,15 @@ impl Store {
 
         let tx = self.db.transaction()?;
         let mut count = 0;
-        let mut current: Option<HashMap<String, Vec<(HashMap<String, String>, String)>>> = None;
+        let mut current: Option<IcsProps> = None;
         for (name, params_, value) in lines {
             match (name.as_str(), value.as_str()) {
                 ("BEGIN", "VEVENT") => current = Some(HashMap::new()),
                 ("END", "VEVENT") => {
-                    if let Some(props) = current.take() {
-                        if store_ics_event(&tx, calendar_id, &props)? {
+                    if let Some(props) = current.take()
+                        && store_ics_event(&tx, calendar_id, &props)? {
                             count += 1;
                         }
-                    }
                 }
                 _ => {
                     if let Some(props) = current.as_mut() {
@@ -481,13 +487,13 @@ impl Store {
         let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let tx = self.db.transaction()?;
         let mut count = 0;
-        let mut card: Option<Vec<(String, HashMap<String, String>, String)>> = None;
+        let mut card: Option<Vec<VcardLine>> = None;
         for (name, params_, value) in unfold(&text) {
             match (name.as_str(), value.to_ascii_uppercase().as_str()) {
                 ("BEGIN", "VCARD") => card = Some(Vec::new()),
                 ("END", "VCARD") => {
-                    if let Some(props) = card.take() {
-                        if let Some(person) = person_from_vcard(&props) {
+                    if let Some(props) = card.take()
+                        && let Some(person) = person_from_vcard(&props) {
                             let first_email = person.fields.iter().find(|f| f.kind == "email").map(|f| f.value.to_lowercase());
                             let duplicate: bool = tx.query_row(
                                 "select count(*) > 0 from people p where p.full_name = ?1 and (?2 is null or exists
@@ -500,7 +506,6 @@ impl Store {
                                 count += 1;
                             }
                         }
-                    }
                 }
                 _ => {
                     if let Some(props) = card.as_mut() {
@@ -708,7 +713,7 @@ fn ics_duration(value: &str) -> Option<i64> {
 fn store_ics_event(
     tx: &rusqlite::Transaction,
     calendar_id: i64,
-    props: &HashMap<String, Vec<(HashMap<String, String>, String)>>,
+    props: &IcsProps,
 ) -> Result<bool> {
     let first = |name: &str| props.get(name).and_then(|v| v.first());
     let text = |name: &str| first(name).map(|(_, v)| unescape(v)).filter(|t| !t.trim().is_empty());

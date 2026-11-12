@@ -57,15 +57,14 @@ pub async fn discover(email: &str) -> Result<AccountConfig> {
     }
 
     // Domains hosted by Google Workspace or Microsoft 365 are found through their MX host.
-    if let Some(mx_domain) = mx_base_domain(domain).await {
-        if mx_domain != domain {
+    if let Some(mx_domain) = mx_base_domain(domain).await
+        && mx_domain != domain {
             let url = format!("https://autoconfig.thunderbird.net/v1.1/{mx_domain}");
             if let Some(mut config) = fetch(&http, &url, &email, "Mozilla's ISP database (via MX)").await {
                 config.username = email.clone();
                 return Ok(config);
             }
         }
-    }
 
     Ok(guess(&email, domain))
 }

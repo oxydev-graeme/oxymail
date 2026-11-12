@@ -23,6 +23,7 @@
     draft: "M14 3H6v18h12V7zM14 3v4h4M9 13h6M9 17h4",
     folder: "M3 6h6l2 2h10v11H3z",
     spam: "M12 3l9 16H3zM12 10v4M12 17h.01",
+    filter: "M3 5h18l-7 8.5V19l-4 2v-7.5z",
     check: "M4 12l5 5L20 6",
     checks: "M2 12l5 5L18 6M12 16l1 1L22 8",
     pen: "M4 20h4L19 9l-4-4L4 16zM14 6l4 4",

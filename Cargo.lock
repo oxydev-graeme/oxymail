@@ -3414,6 +3414,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "core-foundation 0.10.1",
  "dirs 7.0.0",
  "open",
  "oxymail-core",
@@ -3430,6 +3431,8 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tokio",
+ "windows",
+ "windows-registry",
  "zbus",
 ]
 

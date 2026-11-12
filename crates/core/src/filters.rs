@@ -48,6 +48,23 @@ pub fn glob_contains(text: &str, pattern: &str) -> bool {
     any
 }
 
+impl Filter {
+    /// Whether this filter applies to a message of `account` with these headers.
+    fn matches(&self, account: i64, subject: &str, from: &str, to: &str) -> bool {
+        self.account_id.is_none_or(|a| a == account)
+            && match self.field.as_str() {
+                "subject" => glob_contains(subject, &self.value),
+                "from" => glob_contains(from, &self.value),
+                "to" => glob_contains(to, &self.value),
+                _ => [subject, from, to].iter().any(|t| glob_contains(t, &self.value)),
+            }
+    }
+}
+
+/// The columns a filter looks at, for messages joined with their folder.
+const FILTER_COLUMNS: &str = "f.account_id, coalesce(m.subject, ''),
+    coalesce(m.from_name, '') || ' ' || coalesce(m.from_addr, ''), coalesce(m.to_addrs, '')";
+
 impl Store {
     pub fn filters(&self) -> Result<Vec<Filter>> {
         let mut stmt = self
@@ -120,30 +137,46 @@ impl Store {
         if filters.is_empty() {
             return Ok(out);
         }
-        let mut stmt = self.db.prepare_cached(
-            "select f.account_id, coalesce(m.subject, ''), coalesce(m.from_name, '') || ' ' || coalesce(m.from_addr, ''),
-                    coalesce(m.to_addrs, '')
-             from messages m join folders f on f.id = m.folder_id where m.id = ?1 and m.deleted = 0",
-        )?;
+        let mut stmt = self.db.prepare_cached(&format!(
+            "select {FILTER_COLUMNS} from messages m join folders f on f.id = m.folder_id where m.id = ?1 and m.deleted = 0"
+        ))?;
         for id in ids {
             let row = stmt.query_row([id], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
             });
             let Ok((account, subject, from, to)) = row else { continue };
-            let hit = filters.iter().find(|f| {
-                f.account_id.is_none_or(|a| a == account)
-                    && match f.field.as_str() {
-                        "subject" => glob_contains(&subject, &f.value),
-                        "from" => glob_contains(&from, &f.value),
-                        "to" => glob_contains(&to, &f.value),
-                        _ => [&subject, &from, &to].iter().any(|t| glob_contains(t, &f.value)),
-                    }
-            });
-            if let Some(f) = hit {
+            if let Some(f) = filters.iter().find(|f| f.matches(account, &subject, &from, &to)) {
                 out.entry(f.action.clone()).or_default().push(*id);
             }
         }
         Ok(out)
+    }
+
+    /// The mail already in an Inbox that a filter applies to (skipping mail it would change
+    /// nothing for: read mail for "Mark as read", starred mail for "Star"), for running a
+    /// filter on mail that arrived before it existed.
+    pub fn filter_existing(&self, filter_id: i64) -> Result<Vec<i64>> {
+        let Some(filter) = self.filters()?.into_iter().find(|f| f.id == filter_id) else { bail!("that filter no longer exists") };
+        let skip = match filter.action.as_str() {
+            "read" => "and m.unread = 1",
+            "star" => "and m.starred = 0",
+            _ => "",
+        };
+        let mut stmt = self.db.prepare(&format!(
+            "select m.id, {FILTER_COLUMNS} from messages m join folders f on f.id = m.folder_id
+             where f.role = 'inbox' and m.deleted = 0 {skip}"
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?))
+        })?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let (id, account, subject, from, to) = row?;
+            if filter.matches(account, &subject, &from, &to) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
     }
 }
 
@@ -191,6 +224,15 @@ mod tests {
         assert_eq!(hits.get("spam").map(Vec::len), Some(1));
         assert_eq!(hits.get("archive").map(Vec::len), Some(1));
         assert!(!hits.contains_key("trash"), "disabled filters don't run");
+
+        // Run now: the same rule over the Inbox, skipping mail it would change nothing for.
+        let saved = store.filters()?;
+        let spam_id = saved.iter().find(|f| f.action == "spam").unwrap().id;
+        assert_eq!(store.filter_existing(spam_id)?.len(), 1);
+        let read = store.save_filter(&Filter { id: 0, account_id: None, field: "any".into(), value: "*".into(), action: "read".into(), enabled: true });
+        assert!(read.is_err(), "a filter of only stars matches nothing and is refused");
+        let lunch = saved.iter().find(|f| f.action == "trash").unwrap().id;
+        assert_eq!(store.filter_existing(lunch)?.len(), 1, "Run now works on a filter that's switched off");
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

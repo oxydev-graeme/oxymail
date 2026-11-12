@@ -45,10 +45,7 @@ pub fn ensure_watchers(app: &AppHandle) {
 /// when the account is removed or the server has no IDLE (the 3-minute sync still covers it).
 async fn watch_inbox(app: AppHandle, account_id: i64) {
     let mut failures = 0u32;
-    loop {
-        let Some(account) = Store::open(&Store::default_path()).ok().and_then(|s| s.live_account(account_id).ok().flatten()) else {
-            break;
-        };
+    while let Some(account) = Store::open(&Store::default_path()).ok().and_then(|s| s.live_account(account_id).ok().flatten()) {
         let Ok(config) = config_of(&account.config) else { break };
         let outcome = match oxymail_sync::credential(&config).await {
             Ok(secret) => imap::idle_inbox(&config, &secret, IDLE_WINDOW).await,
@@ -294,6 +291,24 @@ async fn apply_filters(app: &AppHandle, matches: BTreeMap<String, Vec<i64>>) -> 
     handled
 }
 
+/// Runs one filter on the mail already in an Inbox. Returns how many messages it handled.
+#[tauri::command]
+pub async fn run_filter(app: AppHandle, state: State<'_, AppState>, id: i64) -> Res<usize> {
+    let (action, ids) = {
+        let store = state.0.lock().map_err(err)?;
+        let action = store.filters().map_err(err)?.into_iter().find(|f| f.id == id).map(|f| f.action).ok_or("that filter no longer exists")?;
+        (action, store.filter_existing(id).map_err(|e| format!("{e:#}"))?)
+    };
+    let count = ids.len();
+    if count > 0 {
+        apply_filters(&app, BTreeMap::from([(action, ids)])).await;
+        if let Ok(store) = state.0.lock() {
+            crate::badge::refresh(&app, &store);
+        }
+    }
+    Ok(count)
+}
+
 /// Sends a message from a live account, files it in Sent, then syncs that account.
 #[tauri::command]
 pub async fn send_message(app: AppHandle, account_id: i64, mail: Outgoing) -> Res<String> {
@@ -337,11 +352,10 @@ pub async fn deliver(app: &AppHandle, account_id: i64, mut mail: Outgoing) -> Re
 
     // Gmail files sent mail by itself; everyone else needs an APPEND.
     let mut note = "Sent".to_string();
-    if !config.smtp.host.ends_with("gmail.com") {
-        if let Err(e) = imap::append_sent(&config, &password, &raw).await {
+    if !config.smtp.host.ends_with("gmail.com")
+        && let Err(e) = imap::append_sent(&config, &password, &raw).await {
             note = format!("Sent, but it couldn't be saved to the Sent folder: {}", full(e));
         }
-    }
     let handle = app.clone();
     tauri::async_runtime::spawn(async move { sync_accounts(handle, Some(account_id)).await });
     Ok(note)

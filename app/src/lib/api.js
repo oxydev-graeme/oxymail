@@ -28,6 +28,8 @@ export const api = {
   filters: () => invoke("filters"),
   saveFilter: (filter) => invoke("save_filter", { filter }),
   deleteFilter: (id) => invoke("delete_filter", { id }),
+  /** Runs a filter on the mail already in an Inbox; resolves to how many messages it handled. */
+  runFilter: (id) => invoke("run_filter", { id }),
   importMailbirdFilters: (path) => invoke("import_mailbird_filters", { path }),
   reorderAccounts: (ids) => invoke("reorder_accounts", { ids }),
   updateAccount: (id, update) => invoke("update_account", { id, update }),
@@ -111,7 +113,7 @@ export const DEFAULT_SETTINGS = {
   important_marker: "true",
   /** "true" (at once), a number of seconds, or "false" (never). */
   mark_read_on_open: "true",
-  select_next: "true",
+  select_next: "true", group_conversations: "false", reading_pane: "right",
   notifications: "true",
   new_mail_sound: "true",
   unread_badge: "true",

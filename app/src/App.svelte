@@ -10,6 +10,7 @@
   import Avatar from "./lib/Avatar.svelte";
   import Compose from "./lib/Compose.svelte";
   import MovePicker from "./lib/MovePicker.svelte";
+  import FilterFromMessage from "./lib/FilterFromMessage.svelte";
   import TimeMenu from "./lib/TimeMenu.svelte";
   import CalendarView from "./lib/CalendarView.svelte";
   import ContactsView from "./lib/ContactsView.svelte";
@@ -151,7 +152,7 @@
   const when = (ts) => new Date(ts * 1000).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
   function openSnooze() {
-    const msgs = multi ? selectedMsgs : selected ? [selected] : [];
+    const msgs = withMembers(multi ? selectedMsgs : selected ? [selected] : []);
     if (msgs.length) snoozing = msgs;
   }
 
@@ -159,7 +160,7 @@
     const msgs = snoozing;
     snoozing = null;
     const ids = msgs.map((m) => m.id);
-    for (const id of ids) dropFromList(id);
+    dropFromList(ids);
     if (!(await act(() => api.snooze(ids, at)))) return refreshList();
     new Set(msgs.map((m) => m.account_id)).forEach(refreshFolders);
     refreshQueues();
@@ -272,6 +273,29 @@
   let anchorId = null;
   let multi = $derived(selectedIds.length > 1);
   let selectedMsgs = $derived(list.filter((m) => selectedIds.includes(m.id)));
+
+  // ---- Conversations -------------------------------------------------------
+  // Settings → Reading: "Group messages into conversations" shows one row per conversation in
+  // a folder (its newest message, with a count); actions on that row apply to all of them.
+  let grouped = $derived(settings.group_conversations === "true");
+  const threadOf = (m) => (m.thread_key ? `${m.account_id}:${m.thread_key}` : `id:${m.id}`);
+  let threads = $derived.by(() => {
+    const map = new Map();
+    if (!grouped) return map;
+    for (const m of list) {
+      const key = threadOf(m);
+      if (map.has(key)) map.get(key).push(m);
+      else map.set(key, [m]);
+    }
+    return map;
+  });
+  /** The rows shown: every message, or the newest of each conversation (the list is newest first). */
+  let rows = $derived(grouped ? [...threads.values()].map((g) => g[0]) : list);
+  /** A row's messages: just itself, or its whole conversation in this list when grouped. */
+  const membersOf = (m) => (grouped ? (threads.get(threadOf(m)) ?? [m]) : [m]);
+  /** Messages with the rest of their conversations added. */
+  const withMembers = (msgs) => [...new Map(msgs.flatMap(membersOf).map((m) => [m.id, m])).values()];
+  const rowUnread = (m) => membersOf(m).some((x) => x.unread);
   let moving = $state(null);
   let remoteAllowed = $state(false);
   /** Other messages in the open message's conversation. */
@@ -549,10 +573,11 @@
       const m = list.find((x) => x.id === id);
       // "true" marks it read at once, a number after that many seconds on the message, "false" never.
       const when = settings.mark_read_on_open;
-      if (m?.unread && when !== "false") {
+      const unread = m ? membersOf(m).filter((x) => x.unread).map((x) => x.id) : [];
+      if (unread.length && when !== "false") {
         const markRead = async () => {
           if (selectedId !== id) return;
-          await setFlag([id], "S", true);
+          await setFlag(unread, "S", true);
           refreshFolders(m.account_id);
         };
         const seconds = when === "true" ? 0 : Number(when) || 0;
@@ -574,17 +599,20 @@
 
   async function toggleRead(m = selected) {
     if (!m) return;
-    await setFlag([m.id], "S", m.unread);
+    const unread = rowUnread(m);
+    await setFlag(membersOf(m).map((x) => x.id), "S", unread);
     refreshFolders(m.account_id);
   }
 
   /** Runs a move-style action, takes the message out of the list and offers Undo. */
   async function moveAway(m, action, label, undoable = true) {
     if (!m) return;
+    // A whole conversation: handled like a selection of its messages.
+    if (membersOf(m).length > 1) return bulkMove(action, label, undoable, membersOf(m));
     const from = m.folder_id;
     // Take it out of the list straight away; server moves can take a moment.
     dropFromList(m.id);
-    const ok = await act(action);
+    const ok = await act(() => action([m.id]));
     if (!ok) {
       if (!searching && folder) refreshList();
       return;
@@ -598,9 +626,21 @@
     });
   }
 
-  const archive = (m = null) => (m && !selectedIds.includes(m.id) ? moveAway(m, () => api.moveTo([m.id], "archive"), "Archived") : bulkMove((ids) => api.moveTo(ids, "archive"), "Archived"));
-  const moveToInbox = (m = null) => (m && !selectedIds.includes(m.id) ? moveAway(m, () => api.moveTo([m.id], "inbox"), "Moved to Inbox") : bulkMove((ids) => api.moveTo(ids, "inbox"), "Moved to Inbox"));
-  const restore = (m = null) => (m && !selectedIds.includes(m.id) ? moveAway(m, () => api.restore([m.id]), "Restored") : bulkMove((ids) => api.restore(ids), "Restored"));
+  const archive = (m = null) => (m && !selectedIds.includes(m.id) ? moveAway(m, (ids) => api.moveTo(ids, "archive"), "Archived") : bulkMove((ids) => api.moveTo(ids, "archive"), "Archived"));
+  const moveToInbox = (m = null) => (m && !selectedIds.includes(m.id) ? moveAway(m, (ids) => api.moveTo(ids, "inbox"), "Moved to Inbox") : bulkMove((ids) => api.moveTo(ids, "inbox"), "Moved to Inbox"));
+  const markSpam = (m = null) => (m && !selectedIds.includes(m.id) ? moveAway(m, (ids) => api.moveTo(ids, "spam"), "Moved to Spam") : bulkMove((ids) => api.moveTo(ids, "spam"), "Moved to Spam"));
+  /** In Spam, "!" and the button take mail back out; anywhere else they report it. */
+  const toggleSpam = () => (selectedRole === "spam" ? moveToInbox() : markSpam());
+
+  /** The message a "New filter" dialog is open for. */
+  let filtering = $state(null);
+  function filterDone(ran) {
+    filtering = null;
+    flash(ran ? `Filter created and applied to ${ran} message${ran === 1 ? "" : "s"}` : "Filter created");
+    if (ran && folder && !searching) refreshList();
+  }
+
+  const restore = (m = null) => (m && !selectedIds.includes(m.id) ? moveAway(m, (ids) => api.restore(ids), "Restored") : bulkMove((ids) => api.restore(ids), "Restored"));
 
   function remove(m = selected) {
     if (multi && (!m || selectedIds.includes(m.id))) {
@@ -619,9 +659,9 @@
               "For archive accounts the original file in your export is kept.",
       );
       if (!ok) return;
-      return moveAway(m, () => api.remove([m.id]), live ? "Deleted forever" : "Removed from OxyMail", false);
+      return moveAway(m, (ids) => api.remove(ids), live ? "Deleted forever" : "Removed from OxyMail", false);
     }
-    return moveAway(m, () => api.remove([m.id]), "Moved to Trash");
+    return moveAway(m, (ids) => api.remove(ids), "Moved to Trash");
   }
 
   /**
@@ -656,10 +696,10 @@
       anchorId = m.id;
       if (selectedIds.length === 1) select(selectedIds[0]);
     } else if (event.shiftKey && anchorId !== null) {
-      const a = list.findIndex((x) => x.id === anchorId);
-      const b = list.findIndex((x) => x.id === m.id);
+      const a = rows.findIndex((x) => x.id === anchorId);
+      const b = rows.findIndex((x) => x.id === m.id);
       const [from, to] = a < b ? [a, b] : [b, a];
-      selectedIds = list.slice(from, to + 1).map((x) => x.id);
+      selectedIds = rows.slice(from, to + 1).map((x) => x.id);
     } else {
       select(m.id);
     }
@@ -669,12 +709,12 @@
 
   /** Moves the selected messages away (archive, delete, folder…) with an Undo that puts each back. */
   async function bulkMove(action, label, undoable = true, only = null) {
-    const msgs = only ?? (multi ? selectedMsgs : selected ? [selected] : []);
+    const msgs = withMembers(only ?? (multi ? selectedMsgs : selected ? [selected] : []));
     if (!msgs.length) return;
     const ids = msgs.map((m) => m.id);
     const origins = Object.groupBy ? Object.groupBy(msgs, (m) => m.folder_id) : groupBy(msgs, (m) => m.folder_id);
     const accountsTouched = [...new Set(msgs.map((m) => m.account_id))];
-    for (const id of ids) dropFromList(id);
+    dropFromList(ids);
     selectedIds = selectedId ? [selectedId] : [];
     const ok = await act(() => action(ids));
     accountsTouched.forEach(refreshFolders);
@@ -695,7 +735,7 @@
   }
 
   async function bulkFlag(flag, on) {
-    const msgs = multi ? selectedMsgs : selected ? [selected] : [];
+    const msgs = withMembers(multi ? selectedMsgs : selected ? [selected] : []);
     if (!msgs.length) return;
     if (!(await setFlag(msgs.map((m) => m.id), flag, on))) return;
     new Set(msgs.map((m) => m.account_id)).forEach(refreshFolders);
@@ -718,7 +758,8 @@
 
   function dragRows(event, m) {
     // Dragging a selected message drags the whole selection; any other row drags just itself.
-    const ids = selectedIds.includes(m.id) ? selectedIds : [m.id];
+    const picked = selectedIds.includes(m.id) ? selectedMsgs : [m];
+    const ids = withMembers(picked).map((x) => x.id);
     event.dataTransfer.setData("application/x-oxymail", JSON.stringify({ ids, account: m.account_id }));
     event.dataTransfer.effectAllowed = "move";
   }
@@ -760,14 +801,16 @@
     }
   }
 
-  function dropFromList(id) {
-    const i = list.findIndex((m) => m.id === id);
-    if (i < 0) return;
-    list = list.filter((m) => m.id !== id);
-    selectedIds = selectedIds.filter((x) => x !== id);
-    if (selectedId === id) {
+  /** Takes messages (an id or a list of ids) out of the list, opening the next row if the open one went. */
+  function dropFromList(ids) {
+    const gone = new Set(Array.isArray(ids) ? ids : [ids]);
+    if (!list.some((m) => gone.has(m.id))) return;
+    const i = rows.findIndex((m) => m.id === selectedId);
+    list = list.filter((m) => !gone.has(m.id));
+    selectedIds = selectedIds.filter((x) => !gone.has(x));
+    if (gone.has(selectedId)) {
       // Settings → Reading: open the next message, or leave the reader empty.
-      const next = settings.select_next === "false" ? null : (list[i] ?? list[i - 1]);
+      const next = settings.select_next === "false" || i < 0 ? null : (rows[i] ?? rows[i - 1]);
       if (next) select(next.id);
       else {
         selectedId = null;
@@ -781,31 +824,46 @@
   // ---- Resizable columns ---------------------------------------------------
   // Widths the user dragged are saved as settings; without one, the CSS defaults apply (which
   // narrow in smaller windows). While dragging, `resizing` holds the live width.
-  const COLUMN_LIMITS = { sidebar_width: [180, 420], list_width: [260, 720] };
+  const COLUMN_LIMITS = { sidebar_width: [180, 420], list_width: [260, 720], list_height: [140, 2000] };
   const READER_MIN = 360;
+  /** With the reading pane below the list, the reader keeps at least this much height. */
+  const READER_MIN_HEIGHT = 220;
   let resizing = $state(null);
   const columnWidth = (key) => (resizing?.key === key ? resizing.width : Number(settings[key]) || 0);
+  /** Settings → Appearance: the reading pane beside the list (default) or below it. */
+  let below = $derived(mode === "mail" && settings.reading_pane === "below");
   let columnStyle = $derived(
-    [["--side-w", columnWidth("sidebar_width")], ["--list-w", columnWidth("list_width")]]
+    [["--side-w", columnWidth("sidebar_width")], ["--list-w", columnWidth("list_width")], ["--list-h", columnWidth("list_height")]]
       .filter(([, w]) => w > 0)
       .map(([name, w]) => `${name}: ${w}px`)
       .join("; "),
   );
 
+  /** `width` is the size being dragged: a width, or for `list_height` a height. */
   function startResize(event, key, pane) {
     if (event.button !== 0) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
-    const width = document.querySelector(pane).getBoundingClientRect().width;
-    resizing = { key, startX: event.clientX, startWidth: width, width: Math.round(width) };
+    const box = document.querySelector(pane).getBoundingClientRect();
+    const tall = key === "list_height";
+    const width = tall ? box.height : box.width;
+    resizing = { key, startX: tall ? event.clientY : event.clientX, startWidth: width, width: Math.round(width) };
   }
 
   function moveResize(event) {
     if (!resizing) return;
     const [min, limit] = COLUMN_LIMITS[resizing.key];
+    if (resizing.key === "list_height") {
+      const shell = document.querySelector(".shell")?.getBoundingClientRect().height ?? window.innerHeight;
+      const max = Math.max(min, Math.min(limit, shell - READER_MIN_HEIGHT));
+      const height = resizing.startWidth + event.clientY - resizing.startX;
+      resizing.width = Math.round(Math.min(max, Math.max(min, height)));
+      return;
+    }
     // The reader always keeps room: whatever the other column takes is subtracted.
-    const other = resizing.key === "sidebar_width" ? ".list-pane" : ".sidebar";
-    const otherWidth = document.querySelector(other)?.getBoundingClientRect().width ?? 0;
+    // (Below the list, the reader shares the list's column, so only the sidebar counts.)
+    const other = resizing.key === "sidebar_width" ? (below ? null : ".list-pane") : ".sidebar";
+    const otherWidth = (other && document.querySelector(other)?.getBoundingClientRect().width) || 0;
     const max = Math.max(min, Math.min(limit, window.innerWidth - otherWidth - READER_MIN));
     const width = resizing.startWidth + event.clientX - resizing.startX;
     resizing.width = Math.round(Math.min(max, Math.max(min, width)));
@@ -858,17 +916,18 @@
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a" && list.length) {
       event.preventDefault();
-      selectedIds = list.map((m) => m.id);
+      selectedIds = rows.map((m) => m.id);
       return;
     }
     if (event.ctrlKey || event.metaKey || event.altKey) return;
-    const i = list.findIndex((m) => m.id === selectedId);
+    const i = rows.findIndex((m) => m.id === selectedId);
     const keys = {
-      ArrowDown: () => list[Math.min(i + 1, list.length - 1)] && select(list[Math.min(i + 1, list.length - 1)].id),
+      ArrowDown: () => rows[Math.min(i + 1, rows.length - 1)] && select(rows[Math.min(i + 1, rows.length - 1)].id),
       j: () => keys.ArrowDown(),
-      ArrowUp: () => list[Math.max(i - 1, 0)] && select(list[Math.max(i - 1, 0)].id),
+      ArrowUp: () => rows[Math.max(i - 1, 0)] && select(rows[Math.max(i - 1, 0)].id),
       k: () => keys.ArrowUp(),
       e: () => (selectedRole === "archive" ? moveToInbox() : archive()),
+      "!": () => toggleSpam(),
       Delete: () => remove(),
       "#": () => remove(),
       s: () => (multi ? bulkFlag("F", !selectedMsgs.every((m) => m.starred)) : toggleStar()),
@@ -946,7 +1005,7 @@
 
 <svelte:window onkeydown={onKey} />
 
-<div class="app" class:compact={settings.density === "compact"} class:resizing={!!resizing} style={columnStyle}>
+<div class="app" class:compact={settings.density === "compact"} class:resizing={!!resizing} class:tall={resizing?.key === "list_height"} style={columnStyle}>
   <header class="titlebar" data-tauri-drag-region>
     <div class="brand" data-tauri-drag-region>
       <Logo size={24} />
@@ -986,7 +1045,7 @@
     </div>
   </header>
 
-  <div class="shell">
+  <div class="shell" class:below>
     <!-- Drag to resize the column on its left; double-click for the default width. -->
     <div
       class="col-resize side"
@@ -1001,7 +1060,21 @@
       onpointercancel={endResize}
       ondblclick={() => resetColumn("sidebar_width")}
     ></div>
-    {#if mode === "mail"}
+    {#if below}
+      <div
+        class="row-resize"
+        class:active={resizing?.key === "list_height"}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize the message list"
+        title="Drag to resize · double-click to reset"
+        onpointerdown={(e) => startResize(e, "list_height", ".list-pane")}
+        onpointermove={moveResize}
+        onpointerup={endResize}
+        onpointercancel={endResize}
+        ondblclick={() => resetColumn("list_height")}
+      ></div>
+    {:else if mode === "mail"}
       <div
         class="col-resize list"
         class:active={resizing?.key === "list_width"}
@@ -1161,11 +1234,12 @@
         {/if}
       </div>
       <div class="list" onscroll={onListScroll}>
-        {#each list as m (m.id)}
+        {#each rows as m (m.id)}
+          {@const count = grouped ? membersOf(m).length : 1}
           <div
             class="row"
             class:selected={selectedIds.includes(m.id)}
-            class:unread={m.unread}
+            class:unread={rowUnread(m)}
             draggable={!m.draft}
             ondragstart={(e) => dragRows(e, m)}
             role="listitem"
@@ -1173,6 +1247,7 @@
             <button class="row-main" onclick={(e) => rowClick(e, m)}>
               <div class="row-top">
                 <span class="ellipsis sender">{sender(m)}</span>
+                {#if count > 1}<span class="count" title="{count} messages in this conversation">{count}</span>{/if}
                 <span class="date">{shortDate(m.date)}</span>
               </div>
               <div class="row-subject">
@@ -1240,6 +1315,7 @@
             {:else}
               <button onclick={() => archive()}><Icon name="archive" size={16} /><span>Archive</span></button>
               <button onclick={() => remove()}><Icon name="trash" size={16} /><span>Delete</span></button>
+              <button onclick={toggleSpam}><Icon name={selectedRole === "spam" ? "inbox" : "spam"} size={16} /><span>{selectedRole === "spam" ? "Not spam" : "Spam"}</span></button>
             {/if}
             <button onclick={openMove}><Icon name="folder" size={16} /><span>Move to…</span></button>
             <button onclick={openSnooze}><Icon name="clock" size={16} /><span>Snooze</span></button>
@@ -1266,6 +1342,11 @@
               <button onclick={() => archive()} title="Archive (e)"><Icon name="archive" size={16} /><span>Archive</span></button>
             {/if}
             <button onclick={() => remove()} title="Delete (Del)"><Icon name="trash" size={16} /><span>Delete</span></button>
+            {#if selectedRole === "spam"}
+              <button onclick={toggleSpam} title="Not spam: back to the Inbox (!)"><Icon name="inbox" size={16} /><span>Not spam</span></button>
+            {:else}
+              <button class="secondary" onclick={toggleSpam} title="Spam (!)"><Icon name="spam" size={16} /><span>Spam</span></button>
+            {/if}
           {/if}
           <button class="secondary" onclick={openMove} title="Move to folder (v)"><Icon name="folder" size={16} /><span>Move</span></button>
           {#if selected.snoozed_until}
@@ -1273,6 +1354,7 @@
           {:else}
             <button class="secondary" onclick={openSnooze} title="Snooze (b)"><Icon name="clock" size={16} /><span>Snooze</span></button>
           {/if}
+          <button class="secondary" onclick={() => (filtering = selected)} title="New filter from this message"><Icon name="filter" size={16} /><span>Filter</span></button>
           <span class="sep"></span>
           <button class="secondary" class:starred={selected.starred} onclick={() => toggleStar()} title="Star (s)">
             <Icon name="star" size={16} /><span>{selected.starred ? "Starred" : "Star"}</span>
@@ -1381,6 +1463,15 @@
   <TimeMenu {settings} title={snoozing.length > 1 ? `Snooze ${snoozing.length} messages until…` : "Snooze until…"} onpick={doSnooze} onclose={() => (snoozing = null)} />
 {/if}
 
+{#if filtering}
+  <FilterFromMessage
+    message={filtering}
+    account={accounts.find((a) => a.id === filtering.account_id)}
+    ondone={filterDone}
+    onclose={() => (filtering = null)}
+  />
+{/if}
+
 {#if moving}
   <MovePicker
     accountId={moving.accountId}
@@ -1473,10 +1564,18 @@
   /* Column dividers: a wide invisible grab area centred on each border. */
   .col-resize { position: absolute; top: 0; bottom: 0; z-index: 5; width: 7px; margin-left: -3px; cursor: col-resize; touch-action: none; }
   .col-resize.side { left: var(--side-w); }
+  /* Reading pane below the list: the list and reader stack in the second column. */
+  .shell.below { grid-template-columns: var(--side-w) minmax(0, 1fr); grid-template-rows: var(--list-h, 42%) minmax(0, 1fr); }
+  .shell.below > .sidebar { grid-row: 1 / span 2; }
+  .shell.below > .list-pane { border-right: 0; border-bottom: 1px solid var(--border); }
+  .row-resize { position: absolute; left: var(--side-w); right: 0; top: var(--list-h, 42%); z-index: 5; height: 7px; margin-top: -3px; cursor: row-resize; touch-action: none; }
+  .row-resize::after { content: ""; position: absolute; left: 0; right: 0; top: 3px; height: 1px; transition: background 0.15s; }
+  .row-resize:hover::after, .row-resize.active::after { background: var(--accent); }
   .col-resize.list { left: calc(var(--side-w) + var(--list-w)); }
   .col-resize::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; transition: background 0.15s; }
   .col-resize:hover::after, .col-resize.active::after { background: var(--accent); }
   .resizing { cursor: col-resize; user-select: none; }
+  .resizing.tall { cursor: row-resize; }
 
   /* ---- Sidebar ---- */
   .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; margin: 10px 8px 0; padding: 3px; border-radius: 9px; background: var(--hover); }
@@ -1558,6 +1657,7 @@
   .row:hover .row-actions.hidden { display: none; }
   .row-actions button { display: grid; place-items: center; width: 28px; height: 26px; border-radius: 5px; color: var(--muted); }
   .row-actions button:hover { background: var(--hover); color: var(--text); }
+  .row-top .count { flex-shrink: 0; padding: 0 6px; border-radius: 8px; background: var(--hover); color: var(--muted); font-size: 11px; font-weight: 600; line-height: 17px; }
   .row-actions button.starred, .toolbar button.starred { color: var(--star); }
   .row-actions button.starred :global(path), .toolbar button.starred :global(path), .star-pin :global(path) { fill: currentColor; }
   .star-pin { position: absolute; right: 12px; bottom: 9px; color: var(--star); display: flex; }

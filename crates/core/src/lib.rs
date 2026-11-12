@@ -244,6 +244,8 @@ pub struct MessageSummary {
     /// Gmail marked it important: a copy sits in the account's Important folder.
     pub important: bool,
     pub attachments: i64,
+    /// The conversation it belongs to (same key, same account), for grouping the list.
+    pub thread_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -588,7 +590,8 @@ impl Store {
                     m.message_id is not null and exists(
                         select 1 from messages c join folders cf on cf.id = c.folder_id
                         where c.message_id = m.message_id and c.deleted = 0 and cf.account_id = f.account_id
-                          and (cf.remote_name like '%/Important' or cf.remote_name = 'Important'))
+                          and (cf.remote_name like '%/Important' or cf.remote_name = 'Important')),
+                    m.thread_key
              from messages m join folders f on f.id = m.folder_id
              join accounts a on a.id = f.account_id and a.removed = 0 {tail}"
         );
@@ -611,6 +614,7 @@ impl Store {
                 starred: flags.contains('F'),
                 important: r.get(13)?,
                 attachments: r.get(8)?,
+                thread_key: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -1306,14 +1310,13 @@ fn apply_mailbird_metadata(db: &Connection, root: &Path) -> Result<()> {
         // Mailbird's order only applies until the user reorders accounts themselves.
         let reordered: bool = db
             .query_row("select count(*) > 0 from settings where key = 'accounts_reordered'", [], |r| r.get(0))?;
-        if !reordered {
-            if let Some(index) = account.get("SortIndex").and_then(|x| x.as_i64()) {
+        if !reordered
+            && let Some(index) = account.get("SortIndex").and_then(|x| x.as_i64()) {
                 db.execute(
                     "update accounts set sort_index = ?1 where archive_root = ?2",
                     params![index, root_str],
                 )?;
             }
-        }
     }
     Ok(())
 }
