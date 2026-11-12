@@ -54,7 +54,8 @@
       if (e.unwritable.length) blocked.push(`${e.unwritable.length.toLocaleString()} messages (listed in report.json in the export folder)`);
       result =
         `Brought over ${(e.messages - e.unwritable.length).toLocaleString()} messages from ${e.accounts} accounts, ` +
-        `${r.pim.people.toLocaleString()} contacts and ${r.pim.events.toLocaleString()} calendar events.` +
+        `${r.pim.people.toLocaleString()} contacts, ${r.pim.events.toLocaleString()} calendar events` +
+        ` and ${r.filters.added} filters.` +
         (gaps.length ? ` Mailbird's copy was missing ${gaps.join(" and ")}; those messages are marked.` : "") +
         (blocked.length ? ` Your antivirus blocked ${blocked.join(" and ")}. They are still in the Mailbird store.` : "");
       ondone(r);

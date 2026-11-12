@@ -24,7 +24,7 @@ use serde_json::{Map, Value, json};
 
 mod extras;
 
-pub use extras::ExtrasStats;
+pub use extras::{ExportedFilter, ExtrasStats};
 
 #[derive(Default)]
 pub struct Options {
@@ -54,6 +54,17 @@ pub struct Summary {
     /// Mailbird ids of messages that couldn't be written (antivirus, as a rule); see report.json.
     pub unwritable: Vec<i64>,
     pub extras: ExtrasStats,
+}
+
+/// Mailbird's filters read straight from a `Store` folder (nothing is written there), with how
+/// many couldn't be mapped.
+pub fn filters_from_store(store: &Path) -> Result<(Vec<extras::ExportedFilter>, usize)> {
+    let temp = std::env::temp_dir().join(format!("oxymail-mailbird-filters-{}", std::process::id()));
+    let opened = open_store(store, &temp)?;
+    let result = extras::read_filters(&opened.db);
+    drop(opened);
+    let _ = fs::remove_dir_all(&temp);
+    result
 }
 
 /// True if `dir` is a Mailbird `Store` folder (it holds `Store.db`), rather than an export.
@@ -779,5 +790,21 @@ mod tests {
         assert!(e.to_string().contains("already has files"), "{e}");
         let _ = fs::remove_dir_all(&busy);
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod real_store {
+    /// Reads the filters of a real Mailbird store, read-only: `MAILBIRD_STORE=… cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn reads_filters_from_a_real_store() {
+        let Ok(store) = std::env::var("MAILBIRD_STORE") else { return };
+        let (filters, skipped) = super::filters_from_store(std::path::Path::new(&store)).unwrap();
+        for f in &filters {
+            println!("{:?} {} contains {:?} → {}", f.account, f.field, f.value, f.action);
+        }
+        println!("{} filters, {skipped} skipped", filters.len());
+        assert!(!filters.is_empty());
     }
 }

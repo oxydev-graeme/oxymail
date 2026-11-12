@@ -16,6 +16,90 @@ pub struct ExtrasStats {
     pub collected_addresses: usize,
     pub calendars: usize,
     pub events: usize,
+    /// Filters written to `filters.json`, and ones left out because OxyMail can't tell what
+    /// they do.
+    pub filters: usize,
+    pub filters_skipped: usize,
+}
+
+/// A Mailbird filter in OxyMail's terms, as written to `filters.json`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ExportedFilter {
+    /// The account's address, or `None` for "Unified accounts" (all of them).
+    pub account: Option<String>,
+    /// `subject`
+    pub field: String,
+    pub value: String,
+    /// `spam` or `archive`
+    pub action: String,
+}
+
+/// Mailbird's filters, with how many couldn't be mapped. Only the kinds seen in real stores
+/// are known: condition 2 is "Subject contains"; action 6 is "Mark as spam" and action 0 moves
+/// the message out of the Inbox to the archive. Anything else is counted, not guessed at.
+pub fn read_filters(db: &Connection) -> Result<(Vec<ExportedFilter>, usize)> {
+    let has_filters: bool = db.query_row(
+        "select count(*) > 0 from sqlite_master where type = 'table' and name = 'Filters'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_filters {
+        return Ok((Vec::new(), 0));
+    }
+    let mut stmt = db.prepare(
+        "select f.Id, a.Username, c.Type, c.Value, x.Type
+         from Filters f
+         left join Accounts a on a.Id = f.AccountId
+         left join FilterConditions c on c.FilterId = f.Id
+         left join FilterActions x on x.FilterId = f.Id
+         order by f.Id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<i64>>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, Option<i64>>(4)?,
+        ))
+    })?;
+    // One condition and one action per filter is all Mailbird's editor makes; a filter with
+    // more rows than that is skipped whole rather than half-applied.
+    let mut by_filter: std::collections::BTreeMap<i64, Vec<(Option<String>, Option<i64>, Option<String>, Option<i64>)>> =
+        Default::default();
+    for row in rows {
+        let (id, account, condition, value, action) = row?;
+        by_filter.entry(id).or_default().push((account, condition, value, action));
+    }
+    let mut out = Vec::new();
+    let mut skipped = 0;
+    for rows in by_filter.into_values() {
+        let [(account, condition, value, action)] = rows.as_slice() else {
+            skipped += 1;
+            continue;
+        };
+        let field = match condition {
+            Some(2) => "subject",
+            _ => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let action = match action {
+            Some(6) => "spam",
+            Some(0) => "archive",
+            _ => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let Some(value) = value.as_deref().map(str::trim).filter(|v| !v.trim_matches('*').is_empty()) else {
+            skipped += 1;
+            continue;
+        };
+        out.push(ExportedFilter { account: account.clone(), field: field.into(), value: value.into(), action: action.into() });
+    }
+    Ok((out, skipped))
 }
 
 pub fn export(db: &Connection, store: &Path, out: &Path) -> Result<ExtrasStats> {
@@ -27,6 +111,10 @@ pub fn export(db: &Connection, store: &Path, out: &Path) -> Result<ExtrasStats> 
     let (calendars, events) = calendars(db, &out.join("calendar"))?;
     stats.calendars = calendars;
     stats.events = events;
+    let (filters, skipped) = read_filters(db)?;
+    fs::write(out.join("filters.json"), serde_json::to_string_pretty(&filters)?)?;
+    stats.filters = filters.len();
+    stats.filters_skipped = skipped;
     Ok(stats)
 }
 

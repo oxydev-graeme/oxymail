@@ -221,8 +221,12 @@ pub async fn sync_accounts(app: AppHandle, only: Option<i64>) {
         }
         .await;
         if let Ok(report) = &result {
-            notify_new_mail(&app, &store, &account.email, report);
+            let matches = store.filter_matches(&report.new_in_inbox).unwrap_or_default();
+            let handled = apply_filters(&app, matches).await;
+            notify_new_mail(&app, &store, &account.email, report, &handled);
         }
+        // Mail read on another device is now read here too.
+        crate::badge::refresh(&app, &store);
         let payload = match result {
             Ok(report) => json!({ "account_id": account.id, "report": report }),
             Err(error) => json!({ "account_id": account.id, "error": error }),
@@ -234,20 +238,60 @@ pub async fn sync_accounts(app: AppHandle, only: Option<i64>) {
     }
 }
 
-/// A desktop notification for new Inbox mail, unless turned off in Settings.
-fn notify_new_mail(app: &AppHandle, store: &Store, account: &str, report: &imap::SyncReport) {
-    use tauri_plugin_notification::NotificationExt;
-    if report.new_inbox == 0 || store.settings().ok().and_then(|s| s.get("notifications").cloned()).as_deref() == Some("false") {
+/// A desktop notification for new Inbox mail, unless turned off in Settings. Mail a filter
+/// just moved away or marked read is left out.
+fn notify_new_mail(app: &AppHandle, store: &Store, account: &str, report: &imap::SyncReport, handled: &HashSet<i64>) {
+    let settings = store.settings().unwrap_or_default();
+    if settings.get("notifications").map(String::as_str) == Some("false") {
         return;
     }
-    let (title, body) = match report.new_inbox_preview.as_slice() {
-        [(from, subject)] if report.new_inbox == 1 => (from.clone(), subject.clone()),
-        previews => (
-            format!("{} new messages · {account}", report.new_inbox),
-            previews.iter().map(|(f, s)| format!("{f}: {s}")).collect::<Vec<_>>().join("\n"),
+    let mail: Vec<&(i64, String, String)> = report.new_inbox_mail.iter().filter(|(id, ..)| !handled.contains(id)).collect();
+    if mail.is_empty() {
+        return;
+    }
+    let sound = settings.get("new_mail_sound").map(String::as_str) != Some("false");
+    let (title, body) = match mail.as_slice() {
+        [(_, from, subject)] => (from.clone(), subject.clone()),
+        many => (
+            format!("{} new messages · {account}", many.len()),
+            many.iter().take(3).map(|(_, f, s)| format!("{f}: {s}")).collect::<Vec<_>>().join("\n"),
         ),
     };
-    let _ = app.notification().builder().title(title).body(body).show();
+    let ids = mail.iter().map(|(id, ..)| *id).collect();
+    crate::badge::notify_new_mail(app, title, body, ids, sound);
+}
+
+/// Carries out what the filters (Settings → Filters) matched in mail new to an Inbox, as
+/// action → messages. Returns the messages
+/// moved away or marked read, which then get no notification. A starred one still does.
+async fn apply_filters(app: &AppHandle, matches: BTreeMap<String, Vec<i64>>) -> HashSet<i64> {
+    let mut handled = HashSet::new();
+    let state = app.state::<AppState>();
+    for (action, ids) in matches {
+        let result = match action.as_str() {
+            "spam" => act(app, &state, ids.clone(), Action::Role("spam")).await,
+            "archive" => act(app, &state, ids.clone(), Action::Role("archive")).await,
+            "trash" => act(app, &state, ids.clone(), Action::Delete).await,
+            "read" | "star" => {
+                let flag = if action == "read" { 'S' } else { 'F' };
+                state.0.lock().map_err(err).and_then(|mut store| {
+                    let changed = store.set_flag(&ids, flag, true).map_err(err)?;
+                    push_flags(app, &store, &changed, flag, true);
+                    Ok(())
+                })
+            }
+            _ => continue,
+        };
+        match result {
+            // Starred mail is still new mail worth a notification.
+            Ok(()) if action == "star" => {}
+            Ok(()) => handled.extend(ids),
+            Err(error) => {
+                let _ = app.emit("sync-error", json!({ "error": format!("A filter couldn't {action} {} messages: {error}", ids.len()) }));
+            }
+        }
+    }
+    handled
 }
 
 /// Sends a message from a live account, files it in Sent, then syncs that account.
@@ -345,11 +389,18 @@ pub async fn tick(app: &AppHandle) {
         }
         let _ = app.emit("scheduled-changed", ());
     }
+
+    // Catches whatever else changed the Inbox (moves, deletes, snoozes) and puts back a badge
+    // the panel cleared while the window had focus.
+    crate::badge::refresh(app, &store);
 }
 
 /// Mirrors read/starred changes to the server for messages in live accounts. Runs in the
 /// background; failures arrive as `sync-error` events.
 pub fn push_flags(app: &AppHandle, store: &Store, ids: &[i64], flag: char, on: bool) {
+    if flag == 'S' {
+        crate::badge::refresh(app, store);
+    }
     let Ok(refs) = store.remote_refs(ids) else { return };
     if refs.is_empty() {
         return;
@@ -382,7 +433,7 @@ pub fn push_flags(app: &AppHandle, store: &Store, ids: &[i64], flag: char, on: b
 
 /// What an action asks of each message.
 enum Action {
-    /// To the account folder with this role (`inbox`, `archive`, `trash`).
+    /// To the account folder with this role (`inbox`, `archive`, `spam`).
     Role(&'static str),
     /// To a specific folder (undo, or moving to a chosen folder).
     Folder(i64),
@@ -397,6 +448,7 @@ pub async fn move_to(app: AppHandle, state: State<'_, AppState>, ids: Vec<i64>, 
     let role = match role.as_str() {
         "inbox" => "inbox",
         "archive" => "archive",
+        "spam" => "spam",
         _ => return Err(format!("cannot move to {role}")),
     };
     act(&app, &state, ids, Action::Role(role)).await

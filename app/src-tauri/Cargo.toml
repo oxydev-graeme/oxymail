@@ -8,7 +8,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 oxymail-core = { path = "../../crates/core" }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
 oxymail-sync = { version = "0.1.0", path = "../../crates/sync" }
@@ -22,6 +22,12 @@ tauri-plugin-updater = "2.14.0"
 tauri-plugin-process = "2.4.0"
 dirs = "7.0.0"
 open = "5.4.4"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The unread badge on Linux docks (the Unity launcher entry signal).
+zbus = "5"
 
 # The binary name is the Wayland app id, which must match oxymail.desktop for the icon to show.
 [[bin]]

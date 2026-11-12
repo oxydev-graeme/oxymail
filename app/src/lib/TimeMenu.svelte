@@ -1,10 +1,25 @@
 <script>
   import Icon from "./Icon.svelte";
 
-  /** Pick a moment: quick choices plus any date and time. Used for snooze and send later. */
-  let { title, onpick, onclose } = $props();
+  /**
+   * Pick a moment: quick choices plus any date and time. Used for snooze and send later.
+   * The quick choices follow the weekly schedule in Settings → Snoozing.
+   */
+  let { title, onpick, onclose, settings = {} } = $props();
 
   const now = new Date();
+  const time = (key, fallback) => {
+    const [h, m] = String(settings[key] || fallback).split(":").map(Number);
+    return [Number.isFinite(h) ? h : 8, Number.isFinite(m) ? m : 0];
+  };
+  const [dayH, dayM] = time("day_starts", "08:00");
+  const [endH, endM] = time("workday_ends", "18:00");
+  const [weekendH, weekendM] = time("weekend_starts", "09:00");
+  const weekendDay = Number(settings.weekend_starts_day ?? 6);
+  const weekDay = Number(settings.week_starts_day ?? 1);
+  const laterHours = Number(settings.later_today_hours) || 3;
+  const somedayMonths = Number(settings.someday_months) || 3;
+
   const at = (days, hours, minutes = 0) => {
     const d = new Date(now);
     d.setDate(d.getDate() + days);
@@ -12,18 +27,28 @@
     return d;
   };
   const daysUntil = (weekday) => ((weekday - now.getDay() + 7) % 7) || 7;
+  const someday = new Date(now);
+  someday.setMonth(someday.getMonth() + somedayMonths);
+  someday.setHours(dayH, dayM, 0, 0);
+  const later = new Date(now.getTime() + laterHours * 3600 * 1000);
+  const evening = at(0, endH, endM);
+  const weekend = at(daysUntil(weekendDay), weekendH, weekendM);
+  // "This weekend" only while the weekend is still ahead this week.
+  const weekendAhead = daysUntil(weekendDay) < daysUntil(weekDay) && now.getDay() !== weekendDay;
 
   const options = [
-    now.getHours() < 18 && { label: "Later today", when: new Date(now.getTime() + 3 * 3600 * 1000) },
-    now.getHours() < 17 && { label: "This evening", when: at(0, 18) },
-    { label: "Tomorrow morning", when: at(1, 8) },
-    now.getDay() >= 1 && now.getDay() <= 4 && { label: "This weekend", when: at(daysUntil(6), 9) },
-    { label: "Next week", when: at(daysUntil(1), 8) },
+    later.toDateString() === now.toDateString() && { label: "Later today", when: later },
+    // Once the working day is at least an hour off.
+    evening.getTime() - now.getTime() >= 3600 * 1000 && { label: "This evening", when: evening },
+    { label: "Tomorrow", when: at(1, dayH, dayM) },
+    weekendAhead && { label: "This weekend", when: weekend },
+    { label: "Next week", when: at(daysUntil(weekDay), dayH, dayM) },
+    { label: "Someday", when: someday },
   ].filter(Boolean);
 
   const pad = (n) => String(n).padStart(2, "0");
   const local = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  let custom = $state(local(at(1, 9)));
+  let custom = $state(local(at(1, dayH, dayM)));
 
   const describe = (d) =>
     d.toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });

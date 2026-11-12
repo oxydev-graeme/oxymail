@@ -1,6 +1,6 @@
 <script>
   import { onMount, untrack } from "svelte";
-  import { api, accountLabel, fileToBase64, formatSize } from "./api.js";
+  import { api, accountLabel, fileToBase64, formatSize, composeStyle } from "./api.js";
   import Icon from "./Icon.svelte";
   import RecipientInput from "./RecipientInput.svelte";
   import TimeMenu from "./TimeMenu.svelte";
@@ -12,7 +12,9 @@
    * onsend(accountId, mail, reopen): hands the message over; `reopen` is the draft to bring back
    * if the send is undone or fails.
    */
-  let { draft, accounts, onclose, onsend, onschedule } = $props();
+  let { draft, accounts, settings = {}, onclose, onsend, onschedule } = $props();
+  // Settings → Composing: the font new messages are written in, applied to what's sent too.
+  const bodyStyle = untrack(() => composeStyle(settings));
   let pickingTime = $state(false);
 
   // The draft is read once, when the window opens.
@@ -21,7 +23,7 @@
   let to = $state(initial.to ?? "");
   let cc = $state(initial.cc ?? "");
   let bcc = $state(initial.bcc ?? "");
-  let showCc = $state(Boolean(initial.cc || initial.bcc));
+  let showCc = $state(Boolean(initial.cc || initial.bcc) || untrack(() => settings.show_cc_bcc === "true"));
   let subject = $state(initial.subject ?? "");
   let attachments = $state(initial.attachments ?? []);
   /** Attachments carried over from the forwarded message: { index, name, size }. */
@@ -116,7 +118,7 @@
       cc: split(cc),
       bcc: split(bcc),
       subject,
-      html: editor.innerHTML,
+      html: bodyStyle ? `<div style="${bodyStyle}">${editor.innerHTML}</div>` : editor.innerHTML,
       text: editor.innerText,
       in_reply_to: initial.in_reply_to ?? null,
       references: initial.references ?? [],
@@ -305,7 +307,7 @@
         </label>
       </div>
 
-      <div class="editor" contenteditable="true" role="textbox" aria-multiline="true" tabindex="0" bind:this={editor} oninput={() => bodyVersion++}></div>
+      <div class="editor" contenteditable="true" role="textbox" aria-multiline="true" tabindex="0" bind:this={editor} style={bodyStyle} oninput={() => bodyVersion++}></div>
 
       {#if attachments.length || forwarded.length}
         <div class="attachments">
@@ -340,7 +342,7 @@
 </div>
 
 {#if pickingTime}
-  <TimeMenu title="Send later" onpick={sendLater} onclose={() => (pickingTime = false)} />
+  <TimeMenu {settings} title="Send later" onpick={sendLater} onclose={() => (pickingTime = false)} />
 {/if}
 
 <style>

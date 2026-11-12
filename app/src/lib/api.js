@@ -20,6 +20,15 @@ export const api = {
   settings: () => invoke("settings"),
   setSetting: (key, value) => invoke("set_setting", { key, value }),
   dataLocation: () => invoke("data_location"),
+  autostart: () => invoke("autostart"),
+  setAutostart: (on) => invoke("set_autostart", { on }),
+  takeMailto: () => invoke("take_mailto"),
+  defaultMailApp: () => invoke("default_mail_app"),
+  makeDefaultMailApp: () => invoke("make_default_mail_app"),
+  filters: () => invoke("filters"),
+  saveFilter: (filter) => invoke("save_filter", { filter }),
+  deleteFilter: (id) => invoke("delete_filter", { id }),
+  importMailbirdFilters: (path) => invoke("import_mailbird_filters", { path }),
   reorderAccounts: (ids) => invoke("reorder_accounts", { ids }),
   updateAccount: (id, update) => invoke("update_account", { id, update }),
   removeAccount: (id) => invoke("remove_account", { id }),
@@ -99,10 +108,51 @@ export function imageToIcon(file, size = 96) {
 export const DEFAULT_SETTINGS = {
   theme: "system",
   density: "comfortable",
+  important_marker: "true",
+  /** "true" (at once), a number of seconds, or "false" (never). */
   mark_read_on_open: "true",
+  select_next: "true",
   notifications: "true",
+  new_mail_sound: "true",
+  unread_badge: "true",
+  start_minimized: "true",
+  quit_on_close: "false",
   undo_send_seconds: "8",
+  /** Whole-app and email text size, as a percentage. */
+  app_zoom: "100",
+  email_zoom: "100",
+  compose_font: "",
+  compose_size: "",
+  show_cc_bcc: "false",
+  // Snooze times, as in Mailbird's weekly schedule.
+  day_starts: "08:00",
+  workday_ends: "18:00",
+  weekend_starts_day: "6",
+  weekend_starts: "09:00",
+  week_starts_day: "1",
+  later_today_hours: "3",
+  someday_months: "3",
 };
+
+/** Fonts offered for new messages: ones every mail program shows the same. */
+export const COMPOSE_FONTS = [
+  ["", "Default"],
+  ["Arial, Helvetica, sans-serif", "Arial"],
+  ["Verdana, Geneva, sans-serif", "Verdana"],
+  ["Tahoma, Geneva, sans-serif", "Tahoma"],
+  ["'Trebuchet MS', sans-serif", "Trebuchet MS"],
+  ["Georgia, serif", "Georgia"],
+  ["'Times New Roman', Times, serif", "Times New Roman"],
+  ["'Courier New', Courier, monospace", "Courier New"],
+];
+
+/** Inline style for a new message's body from the compose settings, or "" for the default. */
+export function composeStyle(settings) {
+  const parts = [];
+  if (settings.compose_font) parts.push(`font-family: ${settings.compose_font}`);
+  if (settings.compose_size) parts.push(`font-size: ${settings.compose_size}pt`);
+  return parts.join("; ");
+}
 
 /** Today: "14:05". This year: "21 Oct". Older: "21 Oct 2023". */
 export function shortDate(ts) {
@@ -133,7 +183,7 @@ export function formatSize(bytes) {
  * every remote request (tracking pixels, remote images, fonts); inline styles and data: images
  * always load.
  */
-export function messageDocument(html, allowRemote = false) {
+export function messageDocument(html, allowRemote = false, zoom = 100) {
   const csp = allowRemote
     ? "default-src 'none'; img-src data: https: http:; style-src 'unsafe-inline' https: http:; font-src data: https:"
     : "default-src 'none'; img-src data:; style-src 'unsafe-inline'";
@@ -141,7 +191,7 @@ export function messageDocument(html, allowRemote = false) {
 <meta http-equiv="Content-Security-Policy" content="${csp}">
 <base target="_blank">
 <style>
-  html { color-scheme: light; }
+  html { color-scheme: light;${Number(zoom) && Number(zoom) !== 100 ? ` zoom: ${Number(zoom) / 100};` : ""} }
   body { margin: 0; padding: 20px 24px; font: 14px/1.5 system-ui, sans-serif; color: #1d2433; background: #fff;
          overflow-wrap: anywhere; }
   img { max-width: 100%; height: auto; }

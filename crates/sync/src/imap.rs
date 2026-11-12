@@ -159,9 +159,11 @@ pub struct SyncReport {
     pub removed: usize,
     pub errors: Vec<String>,
     /// New unread Inbox mail since the last sync (not on a folder's first sync), for
-    /// notifications: total count plus sender and subject of the first few.
+    /// notifications: how many, then id, sender and subject of each.
     pub new_inbox: usize,
-    pub new_inbox_preview: Vec<(String, String)>,
+    pub new_inbox_mail: Vec<(i64, String, String)>,
+    /// Every message new to an Inbox since the last sync, read or not, for the filters.
+    pub new_in_inbox: Vec<i64>,
 }
 
 /// Downloads new messages and refreshes flags for every folder of a live account.
@@ -251,12 +253,14 @@ async fn sync_folder(
         for fetch in &fetches {
             let (Some(uid), Some(body)) = (fetch.uid, fetch.body()) else { continue };
             let flags = maildir_flags(fetch.flags());
-            if store.store_remote_message(folder.id, uid, &flags, body)? {
+            if let Some(id) = store.store_remote_message(folder.id, uid, &flags, body)? {
                 new += 1;
-                if role == Some("inbox") && last_uid > 0 && !flags.contains('S') {
-                    report.new_inbox += 1;
-                    if report.new_inbox_preview.len() < 3 {
-                        report.new_inbox_preview.push(oxymail_core::peek_sender_subject(body));
+                if role == Some("inbox") && last_uid > 0 {
+                    report.new_in_inbox.push(id);
+                    if !flags.contains('S') {
+                        report.new_inbox += 1;
+                        let (from, subject) = oxymail_core::peek_sender_subject(body);
+                        report.new_inbox_mail.push((id, from, subject));
                     }
                 }
             }
@@ -368,6 +372,7 @@ pub async fn folder_for_role(session: &mut ImapSession, role: &str) -> Result<St
     let name = match role {
         "archive" => "Archive",
         "trash" => "Trash",
+        "spam" => "Junk",
         "inbox" => "INBOX",
         other => bail!("no {other} folder on the server"),
     };

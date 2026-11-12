@@ -31,7 +31,7 @@ const mock = () => {
   const folders = (aid) => folderNames.map(([name, role], j) => ({ id: aid * 100 + j, account_id: aid, name, role, total: 500 - j * 40, unread: j === 0 ? 7 : 0 }));
   const now = Math.floor(Date.now() / 1000);
   const msgs = (fid) => Array.from({ length: 60 }, (_, k) => ({ id: fid * 1000 + k, folder_id: fid, folder_name: "Inbox", folder_role: "inbox", account_id: Math.floor(fid / 100),
-    date: now - k * 7200, from_name: ["Monica from Euro Appliances", "Asana", "OxyDev", "Darin Halford", "Google Workspace"][k % 5], from_addr: "x@example.com",
+    date: now - k * 7200, important: k % 3 === 0, from_name: ["Monica from Euro Appliances", "Asana", "OxyDev", "Darin Halford", "Google Workspace"][k % 5], from_addr: "x@example.com",
     subject: ["RE: Tax Invoice - INV0000146 for the period ending September and the rest of a long subject line", "New comment on Home page [Final Revisions]", "INV-00050 invoice viewed", "Bay Solar rebuild — next steps", "Security alert"][k % 5],
     snippet: "Hi Jane, please find attached the updated invoice as discussed on our call this morning. Let me know if anything needs changing before month end.",
     unread: k % 3 === 0, starred: k % 7 === 0, attachments: k % 4 === 0 ? 2 : 0 }));
@@ -51,6 +51,13 @@ const mock = () => {
     live_config: () => ({ email: "jane@oxydev.co.za", username: "jane@oxydev.co.za", source: "the provider's autoconfig", oauth: null,
       imap: { host: "mail.oxydev.co.za", port: 993, security: "tls" }, smtp: { host: "mail.oxydev.co.za", port: 465, security: "tls" } }),
     messages_by_role: () => msgs(100).map((m, k) => ({ ...m, account_id: (k % 6) + 1 })),
+    filters: () => [
+      { id: 1, account_id: null, field: "subject", value: "***SPAM***", action: "spam", enabled: true },
+      { id: 2, account_id: null, field: "subject", value: "*squirt*", action: "spam", enabled: true },
+      { id: 3, account_id: 9, field: "subject", value: "[Wordfence Alert]", action: "archive", enabled: true },
+      { id: 4, account_id: null, field: "from", value: "newsletter@", action: "read", enabled: false },
+    ],
+    autostart: () => true,
     suggest_contacts: () => [{ email: "paul@sarongi.co.za", name: "Paul McCree" }, { email: "plarkin@topfiremedia.com", name: "Paul Larkin" }, { email: "paul.another@example.com", name: null }],
     thread: ({ id }) => [
       { id: 900001, folder_id: 102, folder_name: "Sent", account_id: 1, date: now - 90000, from_name: "Jane Smith", subject: "Tax Invoice - INV0000146", snippet: "", unread: false, starred: false, attachments: 0 },
@@ -112,6 +119,17 @@ const shots = [
   ["main-1360-dark", 1360, 860, "dark", async (p) => { await p.click(".row-main"); }],
   ["main-1360-light", 1360, 860, "light", async (p) => { await p.click(".row-main"); }],
   ["main-900", 900, 600, "dark", async (p) => { await p.click(".row-main"); }],
+  // Sidebar dragged narrower and the message list wider; the list divider stays highlighted mid-drag.
+  ["columns-resized", 1360, 860, "dark", async (p) => {
+    await p.click(".row-main");
+    await p.mouse.move(250, 400); await p.mouse.down(); await p.mouse.move(200, 400, { steps: 4 }); await p.mouse.up();
+    await p.mouse.move(580, 400); await p.mouse.down(); await p.mouse.move(760, 400, { steps: 4 });
+  }],
+  // A narrow window with a wide list asked for: the reader still keeps its minimum width.
+  ["columns-900-clamped", 900, 600, "dark", async (p) => {
+    await p.click(".row-main");
+    await p.mouse.move(540, 300); await p.mouse.down(); await p.mouse.move(890, 300, { steps: 4 }); await p.mouse.up();
+  }],
   ["scrolled", 1360, 860, "dark", async (p) => {
     await p.click(".row-main");
     await p.mouse.move(120, 700); await p.mouse.wheel(0, 2000);
@@ -141,6 +159,11 @@ const shots = [
   }],
   ["forward", 1360, 860, "dark", async (p) => { await p.click(".row-main"); await p.click("button:has-text('Forward')"); }],
   ["settings-reading", 1360, 860, "light", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Reading & sending")'); }],
+  ["settings-filters", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Filters")'); }],
+  ["settings-general", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); }],
+  ["settings-composing", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Composing")'); }],
+  ["settings-snoozing", 1360, 860, "dark", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Snoozing")'); }],
+  ["settings-appearance", 1360, 860, "light", async (p) => { await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Appearance")'); }],
   ["multi-select", 1360, 860, "dark", async (p) => {
     const rows = p.locator(".row-main");
     await rows.nth(0).click(); await rows.nth(2).click({ modifiers: ["Control"] }); await rows.nth(4).click({ modifiers: ["Control"] });

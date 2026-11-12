@@ -8,6 +8,8 @@ use std::sync::Mutex;
 use oxymail_core::{Account, AccountUpdate, Folder, ImportStats, MessageSummary, MessageView, Store};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+mod badge;
+mod desktop;
 mod live;
 
 pub(crate) struct AppState(Mutex<Store>);
@@ -61,12 +63,13 @@ fn save_attachment(state: State<AppState>, id: i64, index: usize) -> Res<String>
     Ok(path.display().to_string())
 }
 
+/// Returns every message changed, which includes copies of the same email in other folders.
 #[tauri::command]
-fn set_flag(app: AppHandle, state: State<AppState>, ids: Vec<i64>, flag: char, on: bool) -> Res<()> {
+fn set_flag(app: AppHandle, state: State<AppState>, ids: Vec<i64>, flag: char, on: bool) -> Res<Vec<i64>> {
     let mut store = state.0.lock().map_err(err)?;
-    store.set_flag(&ids, flag, on).map_err(err)?;
-    live::push_flags(&app, &store, &ids, flag, on);
-    Ok(())
+    let changed = store.set_flag(&ids, flag, on).map_err(err)?;
+    live::push_flags(&app, &store, &changed, flag, on);
+    Ok(changed)
 }
 
 #[tauri::command]
@@ -339,6 +342,66 @@ struct MailbirdResult {
     export: oxymail_mailbird_export::Summary,
     mail: ImportStats,
     pim: oxymail_core::PimImport,
+    filters: FilterImport,
+}
+
+#[derive(serde::Serialize, Default)]
+struct FilterImport {
+    added: usize,
+    /// Already there, for an account OxyMail doesn't have, or of a kind it can't tell.
+    skipped: usize,
+}
+
+/// Adds Mailbird's filters, matched to OxyMail's accounts by address.
+fn add_mailbird_filters(db: &Store, filters: Vec<oxymail_mailbird_export::ExportedFilter>, unknown: usize) -> Res<FilterImport> {
+    let accounts = db.accounts().map_err(err)?;
+    let mut mapped = Vec::new();
+    let mut skipped = unknown;
+    for f in filters {
+        let account_id = match &f.account {
+            None => None,
+            Some(email) => match accounts.iter().find(|a| a.name.eq_ignore_ascii_case(email)) {
+                Some(a) => Some(a.id),
+                None => {
+                    skipped += 1;
+                    continue;
+                }
+            },
+        };
+        mapped.push(oxymail_core::Filter { id: 0, account_id, field: f.field, value: f.value, action: f.action, enabled: true });
+    }
+    let added = db.add_filters(&mapped).map_err(err)?;
+    Ok(FilterImport { added, skipped: skipped + mapped.len() - added })
+}
+
+#[tauri::command]
+fn filters(state: State<AppState>) -> Res<Vec<oxymail_core::Filter>> {
+    state.0.lock().map_err(err)?.filters().map_err(err)
+}
+
+#[tauri::command]
+fn save_filter(state: State<AppState>, filter: oxymail_core::Filter) -> Res<i64> {
+    state.0.lock().map_err(err)?.save_filter(&filter).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn delete_filter(state: State<AppState>, id: i64) -> Res<()> {
+    state.0.lock().map_err(err)?.delete_filter(id).map_err(err)
+}
+
+/// Brings over Mailbird's filters from its `Store` folder, or from an export's `filters.json`.
+#[tauri::command]
+fn import_mailbird_filters(state: State<AppState>, path: String) -> Res<FilterImport> {
+    let path = expand_home(&path);
+    let (filters, unknown) = if oxymail_mailbird_export::is_store(&path) {
+        oxymail_mailbird_export::filters_from_store(&path).map_err(|e| format!("{e:#}"))?
+    } else {
+        let file = if path.is_dir() { path.join("filters.json") } else { path };
+        let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        (serde_json::from_str(&text).map_err(err)?, 0)
+    };
+    let db = state.0.lock().map_err(err)?;
+    add_mailbird_filters(&db, filters, unknown)
 }
 
 /// Exports a copy of a Mailbird store to open formats in `out`, then imports the mail, contacts
@@ -361,7 +424,14 @@ async fn migrate_mailbird(app: AppHandle, store: String, out: String) -> Res<Mai
         let mail = db.import_archive(&out.join("mail"), |n| emit("import", n, 0)).map_err(|e| format!("{e:#}"))?;
         emit("contacts", 0, 0);
         let pim = db.import_pim_folder(&out).map_err(|e| format!("{e:#}"))?;
-        Ok(MailbirdResult { export, mail, pim })
+        let filters = match std::fs::read_to_string(out.join("filters.json")) {
+            Ok(text) => {
+                let list = serde_json::from_str(&text).map_err(err)?;
+                add_mailbird_filters(&db, list, export.extras.filters_skipped)?
+            }
+            Err(_) => FilterImport::default(),
+        };
+        Ok(MailbirdResult { export, mail, pim, filters })
     })
     .await
     .map_err(err)?
@@ -371,19 +441,29 @@ fn main() {
     oxymail_sync::init();
     let store = Store::open(&Store::default_path()).expect("opening the OxyMail store");
     live::load_oauth_clients(&store);
+    let args: Vec<String> = std::env::args().collect();
+    desktop::queue_mailto(desktop::mailto_args(&args));
     tauri::Builder::default()
+        // First, so a second launch hands over to this one before anything else starts.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| desktop::second_instance(app, args)))
         .manage(AppState(Mutex::new(store)))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![desktop::AUTOSTART_ARG]),
+        ))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(live::SyncState::default())
-        .setup(|app| {
+        .setup(move |app| {
             // The main window is built here rather than in tauri.conf.json so links clicked in an
             // email open in the browser (or, for mailto:, in Compose) instead of a new webview.
             let handle = app.handle().clone();
+            let hidden = desktop::start_hidden(&app.state::<AppState>(), &args);
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
                 .title("OxyMail")
+                .visible(!hidden)
                 .inner_size(1360.0, 860.0)
                 .min_inner_size(900.0, 560.0)
                 .decorations(false)
@@ -400,6 +480,7 @@ fn main() {
                     tauri::webview::NewWindowResponse::Deny
                 })
                 .build()?;
+            desktop::setup_tray(app)?;
 
             // Check every live account at start-up and then every few minutes.
             let handle = app.handle().clone();
@@ -481,8 +562,29 @@ fn main() {
             unread_by_role,
             live::oauth_sign_in,
             live::oauth_clients,
-            live::set_oauth_client
+            live::set_oauth_client,
+            desktop::take_mailto,
+            filters,
+            save_filter,
+            delete_filter,
+            import_mailbird_filters,
+            desktop::autostart,
+            desktop::set_autostart,
+            desktop::default_mail_app,
+            desktop::make_default_mail_app
         ])
-        .run(tauri::generate_context!())
-        .expect("running OxyMail");
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                desktop::close_requested(window, api);
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("starting OxyMail")
+        .run(|_app, _event| {
+            // macOS: clicking the dock icon brings back a window closed to the tray.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                desktop::show_main(_app);
+            }
+        });
 }

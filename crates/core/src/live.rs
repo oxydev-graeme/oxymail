@@ -236,14 +236,16 @@ impl Store {
 
     /// Writes a downloaded message into the folder's cache and indexes it. Already-known UIDs
     /// are skipped. Returns true if the message was new.
-    pub fn store_remote_message(&mut self, folder_id: i64, uid: u32, flags: &str, raw: &[u8]) -> Result<bool> {
+    /// Returns the new message's id, or `None` when it was already held (or linked to an
+    /// imported archive copy instead of being stored twice).
+    pub fn store_remote_message(&mut self, folder_id: i64, uid: u32, flags: &str, raw: &[u8]) -> Result<Option<i64>> {
         let known: bool = self.db.query_row(
             "select count(*) > 0 from messages where origin_folder_id = ?1 and uid = ?2",
             params![folder_id, uid],
             |r| r.get(0),
         )?;
         if known {
-            return Ok(false);
+            return Ok(None);
         }
         // Already in the imported archive? Link it to this UID instead of storing it twice.
         if let Some(message_id) = MessageParser::default().parse_headers(raw).and_then(|m| m.message_id().map(str::to_string)) {
@@ -259,7 +261,7 @@ impl Store {
             if let Some(id) = archived {
                 self.db.execute("update messages set uid = ?1, flags = ?2 where id = ?3", params![uid, flags, id])?;
                 self.db.execute("update folders set last_uid = max(last_uid, ?1) where id = ?2", params![uid, folder_id])?;
-                return Ok(false);
+                return Ok(None);
             }
         }
         let (root, dir): (String, String) = self.db.query_row(
@@ -274,7 +276,7 @@ impl Store {
         let rel = format!("cur/{uid}.U{uid}.oxymail{}{flags}", crate::MAILDIR_INFO);
         fs::write(folder_dir.join(&rel), raw)?;
         let tx = self.db.transaction()?;
-        let added = index_message(&tx, &MessageParser::default(), folder_id, &rel, raw, Some(uid))?.is_some();
+        let added = index_message(&tx, &MessageParser::default(), folder_id, &rel, raw, Some(uid))?;
         tx.execute("update folders set last_uid = max(last_uid, ?1) where id = ?2", params![uid, folder_id])?;
         tx.commit()?;
         Ok(added)
@@ -293,12 +295,33 @@ impl Store {
     }
 
     /// Applies flags read from the server (`S`, `F`, `D`, `R` in Maildir terms).
+    ///
+    /// Mail read elsewhere (a phone, webmail) is also marked read in this account's copies
+    /// that have no server counterpart, such as an imported archive copy, which no sync would
+    /// otherwise reach. Copies that are on the server keep the server's own flags.
     pub fn set_remote_flags(&mut self, folder_id: i64, flags: &[(u32, String)]) -> Result<()> {
         let tx = self.db.transaction()?;
+        let mut seen = Vec::new();
         for (uid, f) in flags {
-            tx.execute(
-                "update messages set flags = ?1 where origin_folder_id = ?2 and uid = ?3",
+            let changed = tx.execute(
+                "update messages set flags = ?1 where origin_folder_id = ?2 and uid = ?3 and flags != ?1",
                 params![f, folder_id, uid],
+            )?;
+            if changed > 0 && f.contains('S') {
+                seen.extend(
+                    tx.query_row(
+                        "select id from messages where origin_folder_id = ?1 and uid = ?2",
+                        params![folder_id, uid],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .optional()?,
+                );
+            }
+        }
+        for copy in crate::with_copies(&tx, &seen)?.into_iter().filter(|id| !seen.contains(id)) {
+            tx.execute(
+                "update messages set flags = flags || 'S' where id = ?1 and uid is null and instr(flags, 'S') = 0",
+                [copy],
             )?;
         }
         tx.commit()?;
@@ -474,8 +497,8 @@ mod tests {
         assert_eq!(store.folders(account)?.len(), 1, "no second Inbox");
 
         // A message already in the archive is linked, not stored again; a new one is stored.
-        assert!(!store.store_remote_message(folder.id, 10, "S", mail("both@x", "On server too").as_bytes())?);
-        assert!(store.store_remote_message(folder.id, 11, "", mail("new@x", "Brand new").as_bytes())?);
+        assert!(store.store_remote_message(folder.id, 10, "S", mail("both@x", "On server too").as_bytes())?.is_none());
+        assert!(store.store_remote_message(folder.id, 11, "", mail("new@x", "Brand new").as_bytes())?.is_some());
         assert_eq!(store.messages(folder.id, 0, 50)?.len(), 3);
 
         // The server drops both: the archived one stays visible, the downloaded one goes.

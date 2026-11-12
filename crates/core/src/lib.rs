@@ -12,8 +12,11 @@ use mail_parser::{MessageParser, MimeHeaders};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
+mod filters;
 mod live;
 mod pim;
+
+pub use filters::{Filter, glob_contains};
 pub use pim::{Attendee, Calendar, Event, Occurrence, Person, PersonField, PersonSummary, PimImport};
 pub use live::{LiveAccount, MailbirdServer, RemoteFolder, RemoteRef};
 
@@ -99,6 +102,15 @@ create table if not exists scheduled (
 create table if not exists settings (
     key text primary key,
     value text not null
+);
+create table if not exists filters (
+    id integer primary key,
+    account_id integer,
+    field text not null,
+    value text not null,
+    action text not null,
+    enabled integer not null default 1,
+    sort_index integer not null default 0
 );
 ";
 
@@ -229,6 +241,8 @@ pub struct MessageSummary {
     pub snippet: Option<String>,
     pub unread: bool,
     pub starred: bool,
+    /// Gmail marked it important: a copy sits in the account's Important folder.
+    pub important: bool,
     pub attachments: i64,
 }
 
@@ -414,10 +428,38 @@ impl Store {
         Ok(stats)
     }
 
+    /// Unread Inbox mail across the live (server) accounts, for the taskbar badge. Imported
+    /// archives and other folders are left out: they hold years of mail nobody will read.
+    /// One email in several Inboxes counts once.
+    pub fn inbox_unread(&self) -> Result<i64> {
+        Ok(self.db.query_row(
+            "select count(distinct coalesce(m.message_id, m.id)) from messages m
+             join folders f on f.id = m.folder_id
+             join accounts a on a.id = f.account_id
+             where f.role = 'inbox' and a.kind = 'imap' and a.removed = 0
+               and m.deleted = 0 and m.snoozed_until is null and instr(m.flags, 'S') = 0",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Whether any of `ids` is still unread and not deleted.
+    pub fn any_unread(&self, ids: &[i64]) -> Result<bool> {
+        let mut stmt = self.db.prepare_cached(
+            "select count(*) > 0 from messages where id = ?1 and deleted = 0 and instr(flags, 'S') = 0",
+        )?;
+        for id in ids {
+            if stmt.query_row([id], |r| r.get::<_, bool>(0))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let mut stmt = self.db.prepare(
             "select a.id, a.name, a.kind, a.label, a.sender_name, a.color, a.signature, a.icon,
-                    (select count(*) from messages m join folders f on f.id = m.folder_id
+                    (select count(distinct coalesce(m.message_id, m.id)) from messages m join folders f on f.id = m.folder_id
                      where f.account_id = a.id and m.deleted = 0 and m.snoozed_until is null and instr(m.flags, 'S') = 0
                        and coalesce(f.role, '') not in ('sent', 'drafts', 'spam', 'trash'))
              , a.archive_root is not null
@@ -542,7 +584,11 @@ impl Store {
     fn summaries(&self, tail: &str, params: impl rusqlite::Params) -> Result<Vec<MessageSummary>> {
         let sql = format!(
             "select m.id, m.folder_id, m.date, m.from_name, m.from_addr, m.subject, m.snippet, m.flags,
-                    m.attachments, f.name, f.role, f.account_id, m.snoozed_until
+                    m.attachments, f.name, f.role, f.account_id, m.snoozed_until,
+                    m.message_id is not null and exists(
+                        select 1 from messages c join folders cf on cf.id = c.folder_id
+                        where c.message_id = m.message_id and c.deleted = 0 and cf.account_id = f.account_id
+                          and (cf.remote_name like '%/Important' or cf.remote_name = 'Important'))
              from messages m join folders f on f.id = m.folder_id
              join accounts a on a.id = f.account_id and a.removed = 0 {tail}"
         );
@@ -563,6 +609,7 @@ impl Store {
                 snippet: r.get(6)?,
                 unread: !flags.contains('S'),
                 starred: flags.contains('F'),
+                important: r.get(13)?,
                 attachments: r.get(8)?,
             })
         })?;
@@ -694,12 +741,18 @@ impl Store {
 
     /// Turns a Maildir flag on or off for each message. Only `S` (seen) and `F` (flagged/starred)
     /// are user-settable. Archive messages change only in the index; their files are untouched.
-    pub fn set_flag(&mut self, ids: &[i64], flag: char, on: bool) -> Result<()> {
+    ///
+    /// One email can sit in several folders of an account (Gmail labels such as Important, or
+    /// an imported archive copy beside the server one). Those copies share a `Message-ID` and
+    /// change together, so reading it once reads it everywhere. Returns every id changed,
+    /// copies included, so the caller can push them all to the server.
+    pub fn set_flag(&mut self, ids: &[i64], flag: char, on: bool) -> Result<Vec<i64>> {
         if !matches!(flag, 'S' | 'F') {
             bail!("unsupported flag {flag}");
         }
         let tx = self.db.transaction()?;
-        for id in ids {
+        let all = with_copies(&tx, ids)?;
+        for id in &all {
             let flags: String = tx.query_row("select flags from messages where id = ?1", [id], |r| r.get(0))?;
             let mut chars: Vec<char> = flags.chars().filter(|c| *c != flag).collect();
             if on {
@@ -709,7 +762,7 @@ impl Store {
             tx.execute("update messages set flags = ?1 where id = ?2", params![chars.iter().collect::<String>(), id])?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(all)
     }
 
     /// Marks every unread message in a folder as read and returns their ids (for undo).
@@ -734,8 +787,7 @@ impl Store {
             ))?
             .query_map([arg], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
-        self.set_flag(&ids, 'S', true)?;
-        Ok(ids)
+        self.set_flag(&ids, 'S', true)
     }
 
     /// Moves messages to their account's folder with this role (`archive`, `trash`, `inbox`),
@@ -1141,6 +1193,7 @@ fn migrate(db: &Connection) -> Result<()> {
         ],
     )?;
     db.execute_batch("create index if not exists messages_thread on messages(thread_key)")?;
+    db.execute_batch("create index if not exists messages_message_id on messages(message_id)")?;
     add_missing_columns(db, "accounts", &[("archive_root", "text")])?;
     if db.query_row("select count(*) from sqlite_master where name = 'contacts'", [], |r| r.get::<_, i64>(0))? > 0 {
         add_missing_columns(db, "contacts", &[("images_allowed", "integer not null default 0")])?;
@@ -1389,6 +1442,32 @@ fn is_maildir(dir: &Path) -> bool {
     dir.join("cur").is_dir() || dir.join("new").is_dir()
 }
 
+/// `ids` plus every other live copy of the same email in the same account, matched on
+/// `Message-ID`. Order is kept and nothing appears twice.
+pub(crate) fn with_copies(db: &Connection, ids: &[i64]) -> Result<Vec<i64>> {
+    let mut stmt = db.prepare_cached(
+        "select c.id from messages m
+         join folders f on f.id = m.folder_id
+         join messages c on c.message_id = m.message_id and c.deleted = 0
+         join folders cf on cf.id = c.folder_id and cf.account_id = f.account_id
+         where m.id = ?1 and m.message_id is not null and m.message_id != ''",
+    )?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for id in ids {
+        if seen.insert(*id) {
+            out.push(*id);
+        }
+        for copy in stmt.query_map([id], |r| r.get::<_, i64>(0))? {
+            let copy = copy?;
+            if seen.insert(copy) {
+                out.push(copy);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Separates a Maildir file name from its flags. Windows forbids `:` in file names, so there
 /// it is `;` (the convention Maildir tools use on Windows).
 pub const MAILDIR_INFO: &str = if cfg!(windows) { ";2," } else { ":2," };
@@ -1582,6 +1661,35 @@ mod tests {
         assert_eq!(store.accounts()?.len(), 1);
 
         drop(store);
+        let _ = fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn reading_one_copy_reads_them_all() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("oxymail-copies-{}", std::process::id()));
+        let mail = "From: A <a@example.com>\r\nMessage-ID: <one@example.com>\r\nSubject: Hi\r\n\
+                    Date: Tue, 1 Jul 2025 10:00:00 +0000\r\n\r\nHello\r\n";
+        for folder in ["Inbox", "Important", "Archive"] {
+            let cur = dir.join(format!("mail/me@example.com/{folder}/cur"));
+            fs::create_dir_all(&cur)?;
+            fs::write(cur.join(format!("1.M1.oxymail{MAILDIR_INFO}")), mail)?;
+        }
+        let other = dir.join("mail/other@example.com/Inbox/cur");
+        fs::create_dir_all(&other)?;
+        fs::write(other.join(format!("1.M1.oxymail{MAILDIR_INFO}")), mail)?;
+        let mut store = Store::open(&dir.join("test.db"))?;
+        store.import_archive(&dir.join("mail"), |_| {})?;
+        let me = store.accounts()?.into_iter().find(|a| a.name == "me@example.com").unwrap();
+        assert_eq!(me.unread, 1, "one email in three folders is one unread");
+
+        let copies = store.search("hello", 10)?;
+        let inbox = copies.iter().find(|m| m.account_id == me.id && m.folder_name == "Inbox").unwrap().id;
+        assert_eq!(store.set_flag(&[inbox], 'S', true)?.len(), 3);
+        for m in store.search("hello", 10)? {
+            assert_eq!(m.unread, m.account_id != me.id, "{} in {}", m.folder_name, m.account_id);
+        }
+        assert_eq!(store.accounts()?.iter().find(|a| a.id == me.id).unwrap().unread, 0);
         let _ = fs::remove_dir_all(&dir);
         Ok(())
     }

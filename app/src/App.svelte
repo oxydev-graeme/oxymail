@@ -1,6 +1,7 @@
 <script>
   import { onMount } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { api, listen, isLive, quotableHtml, escapeHtml, parseMailto, accountLabel, DEFAULT_SETTINGS, shortDate, longDate, formatSize, messageDocument } from "./lib/api.js";
   import Logo from "./lib/Logo.svelte";
   import Icon from "./lib/Icon.svelte";
@@ -329,13 +330,25 @@
         if (!searching) refreshList();
       }
     });
-    listen("compose-mailto", ({ payload }) => {
-      const m = parseMailto(payload);
-      composing = { account_id: sendingAccount(selected), to: m.to, cc: m.cc, subject: m.subject, quote: m.body ? escapeHtml(m.body) : undefined };
-    });
+    listen("compose-mailto", ({ payload }) => composeMailto(payload));
+    listen("compose-new", () => compose());
+    // A mailto: link OxyMail was started with (from a browser or another app).
+    api.takeMailto().then((links) => links.forEach(composeMailto)).catch(() => {});
     listen("sync-error", ({ payload }) => {
       error = payload.error;
     });
+  });
+
+  function composeMailto(link) {
+    const m = parseMailto(link);
+    composing = { account_id: sendingAccount(selected), to: m.to, cc: m.cc, subject: m.subject, quote: m.body ? escapeHtml(m.body) : undefined };
+  }
+
+  // Whole-app text size (Settings → Appearance), as the webview's own zoom so every
+  // measurement in the page stays consistent.
+  $effect(() => {
+    const zoom = Number(settings.app_zoom) || 100;
+    getCurrentWebview().setZoom(zoom / 100).catch(() => {});
   });
 
   /** Reloads the visible page of the folder without losing the selection. */
@@ -442,13 +455,16 @@
 
   async function markFolderRead() {
     if (!folder) return;
+    // Counted before: the ids include copies of the same emails in other folders.
+    const count = folder.unread;
     const ids = await api.markFolderRead(folder.id);
-    afterMarkRead(ids, accountId, `Marked ${ids.length.toLocaleString()} as read in ${folder.name}`);
+    afterMarkRead(ids, accountId, `Marked ${count.toLocaleString()} as read in ${folder.name}`);
   }
 
   async function markAccountRead(a) {
+    const count = a.unread;
     const ids = await api.markAccountRead(a.id);
-    afterMarkRead(ids, a.id, `Marked ${ids.length.toLocaleString()} as read in ${a.label || a.name}`);
+    afterMarkRead(ids, a.id, `Marked ${count.toLocaleString()} as read in ${a.label || a.name}`);
   }
 
   function afterMarkRead(ids, changedAccount, label) {
@@ -457,8 +473,7 @@
     refreshFolders(changedAccount);
     if (!ids.length) return;
     flash(label, async () => {
-      await act(() => api.setFlag(ids, "S", false));
-      for (const m of list) if (changed.has(m.id)) m.unread = true;
+      await setFlag(ids, "S", false);
       refreshFolders(changedAccount);
     });
   }
@@ -519,7 +534,10 @@
     if (folder) openFolder(folder);
   }
 
+  let readTimer;
+
   async function select(id) {
+    clearTimeout(readTimer);
     selectedId = id;
     selectedIds = [id];
     anchorId = id;
@@ -529,10 +547,17 @@
       view = await api.message(id);
       api.thread(id).then((t) => (conversation = selectedId === id ? t : conversation)).catch(() => (conversation = []));
       const m = list.find((x) => x.id === id);
-      if (m?.unread && settings.mark_read_on_open === "true") {
-        await api.setFlag([id], "S", true);
-        m.unread = false;
-        refreshFolders(m.account_id);
+      // "true" marks it read at once, a number after that many seconds on the message, "false" never.
+      const when = settings.mark_read_on_open;
+      if (m?.unread && when !== "false") {
+        const markRead = async () => {
+          if (selectedId !== id) return;
+          await setFlag([id], "S", true);
+          refreshFolders(m.account_id);
+        };
+        const seconds = when === "true" ? 0 : Number(when) || 0;
+        if (seconds) readTimer = setTimeout(markRead, seconds * 1000);
+        else await markRead();
       }
     } catch (e) {
       view = null;
@@ -544,14 +569,12 @@
 
   async function toggleStar(m = selected) {
     if (!m) return;
-    await act(() => api.setFlag([m.id], "F", !m.starred));
-    m.starred = !m.starred;
+    await setFlag([m.id], "F", !m.starred);
   }
 
   async function toggleRead(m = selected) {
     if (!m) return;
-    await act(() => api.setFlag([m.id], "S", m.unread));
-    m.unread = !m.unread;
+    await setFlag([m.id], "S", m.unread);
     refreshFolders(m.account_id);
   }
 
@@ -599,6 +622,19 @@
       return moveAway(m, () => api.remove([m.id]), live ? "Deleted forever" : "Removed from OxyMail", false);
     }
     return moveAway(m, () => api.remove([m.id]), "Moved to Trash");
+  }
+
+  /**
+   * Sets a flag and mirrors it onto every visible row it changed, which includes copies of the
+   * same email in other folders (Important, Archive), so a message is never read twice.
+   */
+  async function setFlag(ids, flag, on) {
+    return act(async () => {
+      const changed = new Set(await api.setFlag(ids, flag, on));
+      for (const m of [...list, ...conversation]) {
+        if (changed.has(m.id)) flag === "S" ? (m.unread = !on) : (m.starred = on);
+      }
+    });
   }
 
   async function act(fn) {
@@ -661,8 +697,7 @@
   async function bulkFlag(flag, on) {
     const msgs = multi ? selectedMsgs : selected ? [selected] : [];
     if (!msgs.length) return;
-    if (!(await act(() => api.setFlag(msgs.map((m) => m.id), flag, on)))) return;
-    for (const m of msgs) flag === "S" ? (m.unread = !on) : (m.starred = on);
+    if (!(await setFlag(msgs.map((m) => m.id), flag, on))) return;
     new Set(msgs.map((m) => m.account_id)).forEach(refreshFolders);
   }
 
@@ -731,7 +766,8 @@
     list = list.filter((m) => m.id !== id);
     selectedIds = selectedIds.filter((x) => x !== id);
     if (selectedId === id) {
-      const next = list[i] ?? list[i - 1];
+      // Settings → Reading: open the next message, or leave the reader empty.
+      const next = settings.select_next === "false" ? null : (list[i] ?? list[i - 1]);
       if (next) select(next.id);
       else {
         selectedId = null;
@@ -741,6 +777,51 @@
   }
 
   // ---- Settings, keys, toasts ---------------------------------------------
+
+  // ---- Resizable columns ---------------------------------------------------
+  // Widths the user dragged are saved as settings; without one, the CSS defaults apply (which
+  // narrow in smaller windows). While dragging, `resizing` holds the live width.
+  const COLUMN_LIMITS = { sidebar_width: [180, 420], list_width: [260, 720] };
+  const READER_MIN = 360;
+  let resizing = $state(null);
+  const columnWidth = (key) => (resizing?.key === key ? resizing.width : Number(settings[key]) || 0);
+  let columnStyle = $derived(
+    [["--side-w", columnWidth("sidebar_width")], ["--list-w", columnWidth("list_width")]]
+      .filter(([, w]) => w > 0)
+      .map(([name, w]) => `${name}: ${w}px`)
+      .join("; "),
+  );
+
+  function startResize(event, key, pane) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const width = document.querySelector(pane).getBoundingClientRect().width;
+    resizing = { key, startX: event.clientX, startWidth: width, width: Math.round(width) };
+  }
+
+  function moveResize(event) {
+    if (!resizing) return;
+    const [min, limit] = COLUMN_LIMITS[resizing.key];
+    // The reader always keeps room: whatever the other column takes is subtracted.
+    const other = resizing.key === "sidebar_width" ? ".list-pane" : ".sidebar";
+    const otherWidth = document.querySelector(other)?.getBoundingClientRect().width ?? 0;
+    const max = Math.max(min, Math.min(limit, window.innerWidth - otherWidth - READER_MIN));
+    const width = resizing.startWidth + event.clientX - resizing.startX;
+    resizing.width = Math.round(Math.min(max, Math.max(min, width)));
+  }
+
+  function endResize() {
+    if (!resizing) return;
+    const { key, width } = resizing;
+    resizing = null;
+    changeSetting(key, String(width));
+  }
+
+  /** Double-click a divider: back to the default width. */
+  function resetColumn(key) {
+    changeSetting(key, "");
+  }
 
   async function changeSetting(key, value) {
     settings[key] = value;
@@ -752,7 +833,21 @@
     if (el.scrollTop + el.clientHeight > el.scrollHeight - 600) loadMore();
   }
 
+  const ZOOM_STEPS = [80, 90, 100, 110, 125, 150, 175];
+
   function onKey(event) {
+    // Ctrl + / − / 0: text size, anywhere in the app.
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && ["=", "+", "-", "0"].includes(event.key)) {
+      event.preventDefault();
+      const current = Number(settings.app_zoom) || 100;
+      const i = ZOOM_STEPS.findIndex((z) => z >= current);
+      const next =
+        event.key === "0" ? 100
+        : event.key === "-" ? ZOOM_STEPS[Math.max(0, (i < 0 ? ZOOM_STEPS.length : i) - 1)]
+        : ZOOM_STEPS[Math.min(ZOOM_STEPS.length - 1, ZOOM_STEPS[i] === current ? i + 1 : Math.max(i, 0))];
+      changeSetting("app_zoom", String(next));
+      return;
+    }
     if (showSettings || composing || snoozing || moving || mode !== "mail") return;
     if (event.target instanceof HTMLInputElement) {
       if (event.key === "Escape") {
@@ -851,7 +946,7 @@
 
 <svelte:window onkeydown={onKey} />
 
-<div class="app" class:compact={settings.density === "compact"}>
+<div class="app" class:compact={settings.density === "compact"} class:resizing={!!resizing} style={columnStyle}>
   <header class="titlebar" data-tauri-drag-region>
     <div class="brand" data-tauri-drag-region>
       <Logo size={24} />
@@ -892,6 +987,35 @@
   </header>
 
   <div class="shell">
+    <!-- Drag to resize the column on its left; double-click for the default width. -->
+    <div
+      class="col-resize side"
+      class:active={resizing?.key === "sidebar_width"}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the sidebar"
+      title="Drag to resize · double-click to reset"
+      onpointerdown={(e) => startResize(e, "sidebar_width", ".sidebar")}
+      onpointermove={moveResize}
+      onpointerup={endResize}
+      onpointercancel={endResize}
+      ondblclick={() => resetColumn("sidebar_width")}
+    ></div>
+    {#if mode === "mail"}
+      <div
+        class="col-resize list"
+        class:active={resizing?.key === "list_width"}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the message list"
+        title="Drag to resize · double-click to reset"
+        onpointerdown={(e) => startResize(e, "list_width", ".list-pane")}
+        onpointermove={moveResize}
+        onpointerup={endResize}
+        onpointercancel={endResize}
+        ondblclick={() => resetColumn("list_width")}
+      ></div>
+    {/if}
     <aside class="sidebar">
       <div class="modes" role="tablist">
         {#each [["mail", "mailbox", "Mail"], ["calendar", "calendar", "Calendar"], ["contacts", "contacts", "Contacts"]] as [id, icon, label]}
@@ -1052,6 +1176,7 @@
                 <span class="date">{shortDate(m.date)}</span>
               </div>
               <div class="row-subject">
+                {#if m.important && settings.important_marker !== "false"}<span class="important" title="Marked important by Gmail"></span>{/if}
                 {#if m.attachments > 0}<span class="clip"><Icon name="clip" size={12} /></span>{/if}
                 <span class="ellipsis">{m.subject || "(no subject)"}</span>
               </div>
@@ -1215,10 +1340,10 @@
             class="body-frame"
             title="Message"
             sandbox="allow-popups"
-            srcdoc={messageDocument(view.html, remoteAllowed || view.images_allowed)}
+            srcdoc={messageDocument(view.html, remoteAllowed || view.images_allowed, settings.email_zoom)}
           ></iframe>
         {:else}
-          <pre class="body-text">{view.text ?? ""}</pre>
+          <pre class="body-text" style:zoom={Number(settings.email_zoom) !== 100 ? Number(settings.email_zoom) / 100 : null}>{view.text ?? ""}</pre>
         {/if}
       {:else}
         <div class="placeholder">
@@ -1253,7 +1378,7 @@
 {/if}
 
 {#if snoozing}
-  <TimeMenu title={snoozing.length > 1 ? `Snooze ${snoozing.length} messages until…` : "Snooze until…"} onpick={doSnooze} onclose={() => (snoozing = null)} />
+  <TimeMenu {settings} title={snoozing.length > 1 ? `Snooze ${snoozing.length} messages until…` : "Snooze until…"} onpick={doSnooze} onclose={() => (snoozing = null)} />
 {/if}
 
 {#if moving}
@@ -1270,6 +1395,7 @@
   <Compose
     draft={composing}
     accounts={liveAccounts}
+    {settings}
     onsend={queueSend}
     onschedule={scheduleFromCompose}
     onclose={(kept) => { composing = null; refreshDrafts(); if (kept) flash("Saved to Drafts"); }}
@@ -1291,12 +1417,12 @@
 <style>
   /* minmax(0, …) and min-height: 0 stop grid rows growing to fit their content, so each pane
      gets a fixed height and its own scroll area actually scrolls. */
-  .app { display: grid; grid-template-rows: 46px minmax(0, 1fr); height: 100%; overflow: hidden; }
+  .app { --side-w: 250px; --list-w: 380px; display: grid; grid-template-rows: 46px minmax(0, 1fr); height: 100%; overflow: hidden; }
 
   /* ---- Header bar ---- */
   .titlebar {
     display: grid;
-    grid-template-columns: 250px 380px 1fr auto;
+    grid-template-columns: var(--side-w) var(--list-w) 1fr auto;
     align-items: center;
     background: var(--header);
     border-bottom: 1px solid var(--border);
@@ -1338,12 +1464,19 @@
   .sync-error { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--danger); color: #fff; font-size: 11px; font-weight: 800; flex-shrink: 0; }
   .divider { width: 1px; height: 18px; margin: 0 6px; background: var(--border); }
 
-  .shell { display: grid; grid-template-columns: 250px 380px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); min-height: 0; }
-  /* Smaller windows: narrower sidebar and list so the reader keeps room. */
+  .shell { position: relative; display: grid; grid-template-columns: var(--side-w) var(--list-w) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); min-height: 0; }
+  /* Smaller windows: narrower default sidebar and list so the reader keeps room. Widths the
+     user dragged are set inline on .app and win over these. */
   @media (max-width: 1180px) {
-    .shell { grid-template-columns: 220px 320px minmax(0, 1fr); }
-    .titlebar { grid-template-columns: 220px 320px 1fr auto; }
+    .app { --side-w: 220px; --list-w: 320px; }
   }
+  /* Column dividers: a wide invisible grab area centred on each border. */
+  .col-resize { position: absolute; top: 0; bottom: 0; z-index: 5; width: 7px; margin-left: -3px; cursor: col-resize; touch-action: none; }
+  .col-resize.side { left: var(--side-w); }
+  .col-resize.list { left: calc(var(--side-w) + var(--list-w)); }
+  .col-resize::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; transition: background 0.15s; }
+  .col-resize:hover::after, .col-resize.active::after { background: var(--accent); }
+  .resizing { cursor: col-resize; user-select: none; }
 
   /* ---- Sidebar ---- */
   .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; margin: 10px 8px 0; padding: 3px; border-radius: 9px; background: var(--hover); }
@@ -1404,6 +1537,8 @@
   .date { flex-shrink: 0; font-size: 12px; color: var(--muted); }
   .row-subject { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: 13px; margin-top: 1px; }
   .clip { flex-shrink: 0; }
+  /* Gmail's important marker: a small amber tag. */
+  .important { flex-shrink: 0; width: 12px; height: 9px; margin-right: 1px; background: var(--amber); clip-path: polygon(0 0, 68% 0, 100% 50%, 68% 100%, 0 100%, 28% 50%); }
   .row-snippet { font-size: 12px; color: var(--muted); margin-top: 2px; padding-right: 20px; }
   .row-folder { display: inline-block; margin-top: 4px; padding: 0 7px; border-radius: 99px; font-size: 11px; background: var(--accent-soft); color: var(--accent); }
   .clip { display: inline-flex; color: var(--muted); }
