@@ -15,21 +15,29 @@ An email client with calendar and contacts for **Windows, macOS and Linux**, bui
   - push mail (IMAP IDLE)
   - offline reading
   - full-text search with filters (`from:` `has:attachment` `is:unread` `before:`…)
-  - conversations
+  - conversations, optionally grouped in the message list
+  - the reading pane beside or below the list, resizable columns, and separate text sizes for the app and for emails
 - **Organising:**
   - archive, delete and move on the server, with Undo
   - select several messages at once, or drag them to folders
-  - snooze
-  - mark all as read
+  - snooze, on a schedule that follows your week
+  - mark all as read, and read copies (such as Gmail's Important) together
+  - filters (subject, sender or recipient → spam, archive, delete, mark read, star), made from any message and run on new or existing mail
+  - Spam and Not spam
 - **Writing:**
-  - rich text, signatures per account, attachments
+  - rich text, signatures per account, attachments, a default font and size
   - address autocomplete
   - drafts that save themselves
   - undo send, and send later
+- **On the desktop:**
+  - runs in the tray when the window is closed, and can start with the computer
+  - unread count on the taskbar, dock or launcher
+  - new-mail notifications that are taken away once the mail is read
+  - can be the default email app for `mailto:` links
 - **Privacy:** remote images are blocked unless you allow them, message HTML is sandboxed, and there's a one-click unsubscribe.
 - **Calendar:** month view and agenda, repeating events, show or hide calendars, `.ics` import.
 - **Contacts:** address book with photos, `.vcf` import, Email and Show-emails shortcuts.
-- **Mailbird migration:** a lossless exporter, plus importing the archive with its account order, colours, signatures, contacts and calendars.
+- **Mailbird migration:** a lossless exporter, plus importing the archive with its account order, colours, signatures, contacts, calendars and filters.
 - **Automatic updates** from signed GitHub releases.
 
 ## Layout
