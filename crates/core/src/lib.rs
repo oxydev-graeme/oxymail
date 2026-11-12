@@ -763,7 +763,10 @@ impl Store {
                 chars.push(flag);
             }
             chars.sort_unstable();
-            tx.execute("update messages set flags = ?1 where id = ?2", params![chars.iter().collect::<String>(), id])?;
+            tx.execute(
+                "update messages set flags = ?1, flags_changed_at = unixepoch() where id = ?2",
+                params![chars.iter().collect::<String>(), id],
+            )?;
         }
         tx.commit()?;
         Ok(all)
@@ -1194,6 +1197,8 @@ fn migrate(db: &Connection) -> Result<()> {
             ("from_archive", "integer not null default 0"),
             ("thread_key", "text"),
             ("snoozed_until", "integer"),
+            // When read or starred was last changed here; see `LOCAL_FLAGS_WIN_SECS`.
+            ("flags_changed_at", "integer"),
         ],
     )?;
     db.execute_batch("create index if not exists messages_thread on messages(thread_key)")?;

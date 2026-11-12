@@ -303,9 +303,13 @@ impl Store {
         let tx = self.db.transaction()?;
         let mut seen = Vec::new();
         for (uid, f) in flags {
+            // A message read or starred here moments ago keeps that: the server's flags may
+            // have been fetched before the change reached it (a sync already under way), and
+            // would otherwise undo it, typically on the Important copy of mail read in the Inbox.
             let changed = tx.execute(
-                "update messages set flags = ?1 where origin_folder_id = ?2 and uid = ?3 and flags != ?1",
-                params![f, folder_id, uid],
+                "update messages set flags = ?1 where origin_folder_id = ?2 and uid = ?3 and flags != ?1
+                   and coalesce(flags_changed_at, 0) < unixepoch() - ?4",
+                params![f, folder_id, uid, LOCAL_FLAGS_WIN_SECS],
             )?;
             if changed > 0 && f.contains('S') {
                 seen.extend(
@@ -468,9 +472,48 @@ impl Store {
     }
 }
 
+/// How long a flag changed here wins over the server's copy of it, so a sync that fetched
+/// flags before the change was pushed can't undo it. After this the server is trusted again,
+/// so mail marked unread on another device still comes through.
+pub const LOCAL_FLAGS_WIN_SECS: i64 = 120;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stale_sync_does_not_unread_the_important_copy() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("oxymail-flags-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir)?;
+        let mut store = Store::open(&dir.join("t.db"))?;
+        let account = store.add_live_account("me@gmail.example", "{}", &dir.join("cache"))?;
+        let inbox = store.remote_folder(account, "INBOX", "Inbox", Some("inbox"))?;
+        let important = store.remote_folder(account, "[Gmail]/Important", "Important", None)?;
+        let raw = mail("both@x", "In Inbox and Important");
+        let in_inbox = store.store_remote_message(inbox.id, 1, "", raw.as_bytes())?.expect("stored");
+        let in_important = store.store_remote_message(important.id, 7, "", raw.as_bytes())?.expect("stored");
+        let unread = |s: &Store, id: i64| -> Result<bool> {
+            Ok(s.db.query_row("select instr(flags, 'S') = 0 from messages where id = ?1", [id], |r| r.get(0))?)
+        };
+
+        // Read in the Inbox: both copies read.
+        store.set_flag(&[in_inbox], 'S', true)?;
+        assert!(!unread(&store, in_inbox)? && !unread(&store, in_important)?);
+
+        // A sync that fetched Important's flags before the change reached Gmail still says unread.
+        store.set_remote_flags(important.id, &[(7, String::new())])?;
+        assert!(!unread(&store, in_important)?, "a stale sync must not undo the read");
+
+        // Minutes later the server is trusted again: marked unread on a phone comes through.
+        store.db.execute("update messages set flags_changed_at = unixepoch() - 600", [])?;
+        store.set_remote_flags(important.id, &[(7, String::new())])?;
+        assert!(unread(&store, in_important)?);
+
+        drop(store);
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
 
     fn mail(id: &str, subject: &str) -> String {
         format!("From: A <a@example.com>\r\nMessage-ID: <{id}>\r\nSubject: {subject}\r\nDate: Tue, 1 Jul 2025 10:00:00 +0000\r\n\r\nBody of {subject}\r\n")
