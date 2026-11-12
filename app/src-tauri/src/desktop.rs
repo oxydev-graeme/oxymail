@@ -107,13 +107,59 @@ pub fn setup_tray(app: &App) -> tauri::Result<()> {
         tray = tray.icon(icon.clone());
     }
     tray.build(app)?;
+    app.manage(TrayMenu(vec![open, compose, check, quit]));
+    // See `TrayMenu`: give the panel a reason to fetch the labels once it has read the menu.
+    let handle = app.handle().clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        republish_tray_menu(&handle);
+    });
     Ok(())
+}
+
+/// The tray menu's items, kept so their labels can be published again.
+///
+/// GNOME's AppIndicator extension (Ubuntu's and Zorin's) can show this menu with blank labels:
+/// the menu is announced twice as the icon appears, the second announcement cancels the label
+/// fetch queued by the first, and the extension never asks again. Reporting a label change
+/// later marks the menu stale, so the extension fetches every label the next time it opens.
+pub struct TrayMenu(Vec<MenuItem<tauri::Wry>>);
+
+/// Reports each tray menu label as changed (briefly with a trailing space, then back), which
+/// makes AppIndicator panels that missed the labels fetch them again. Invisible otherwise.
+pub fn republish_tray_menu(app: &AppHandle) {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(menu) = app.try_state::<TrayMenu>() else { return };
+        let items = menu.0.clone();
+        for item in &items {
+            if let Ok(text) = item.text() {
+                let _ = item.set_text(format!("{text} "));
+            }
+        }
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            for item in &items {
+                if let Ok(text) = item.text() {
+                    let _ = item.set_text(text.trim_end());
+                }
+            }
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = app;
 }
 
 /// The unread count beside the tray icon (as a label on Linux panels, in the tooltip
 /// everywhere), or just "OxyMail" when there's nothing unread or the count is turned off.
 pub fn set_tray_count(app: &AppHandle, count: i64) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
+    // A changed count is also a cheap moment to re-publish the menu labels (see `TrayMenu`),
+    // which repairs a panel that re-read the menu since start-up, after a GNOME restart say.
+    static LAST: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+    if LAST.swap(count, std::sync::atomic::Ordering::Relaxed) != count {
+        republish_tray_menu(app);
+    }
     let tooltip = match count {
         0 => "OxyMail".to_string(),
         1 => "OxyMail · 1 unread".to_string(),
