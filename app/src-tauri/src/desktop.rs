@@ -123,6 +123,8 @@ pub fn setup_tray(app: &App) -> tauri::Result<()> {
 /// the menu is announced twice as the icon appears, the second announcement cancels the label
 /// fetch queued by the first, and the extension never asks again. Reporting a label change
 /// later marks the menu stale, so the extension fetches every label the next time it opens.
+// Only Linux panels need the labels re-published; elsewhere the items are just kept.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct TrayMenu(Vec<MenuItem<tauri::Wry>>);
 
 /// Reports each tray menu label as changed (briefly with a trailing space, then back), which
