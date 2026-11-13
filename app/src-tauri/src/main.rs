@@ -163,7 +163,7 @@ fn open_attachment(state: State<AppState>, id: i64, index: usize) -> Res<String>
 }
 
 fn open_external(target: &str) -> Res<()> {
-    open::that_detached(target).map_err(err)
+    desktop::open_external(target)
 }
 
 #[tauri::command]

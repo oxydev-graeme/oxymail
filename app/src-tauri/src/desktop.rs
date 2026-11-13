@@ -199,7 +199,7 @@ pub fn default_mail_app(app: AppHandle) -> Option<bool> {
     let _ = &app;
     #[cfg(target_os = "linux")]
     {
-        let out = std::process::Command::new("xdg-mime").args(["query", "default", "x-scheme-handler/mailto"]).output().ok()?;
+        let out = host_command("xdg-mime").args(["query", "default", "x-scheme-handler/mailto"]).output().ok()?;
         out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim() == LINUX_DESKTOP_FILE)
     }
     #[cfg(target_os = "windows")]
@@ -219,7 +219,7 @@ pub fn make_default_mail_app(app: AppHandle) -> Res<bool> {
     {
         // Not `xdg-settings set default-url-scheme-handler`: on GNOME it also makes the app the
         // default for HTML files (see `undo_html_default`).
-        let status = std::process::Command::new("xdg-mime")
+        let status = host_command("xdg-mime")
             .args(["default", LINUX_DESKTOP_FILE, "x-scheme-handler/mailto"])
             .status()
             .map_err(err)?;
@@ -239,6 +239,67 @@ pub fn make_default_mail_app(app: AppHandle) -> Res<bool> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     Err("not available on this system yet".into())
+}
+
+/// A system program to run with the user's own environment. Inside an AppImage, OxyMail runs
+/// with the AppImage's older GLib and GTK put first in LD_LIBRARY_PATH and friends; passed on,
+/// they crash the system's `gio`, and `xdg-open` then falls back to the web browser (which is
+/// how a PDF attachment opened twice in Brave). So anything pointing into the AppImage is
+/// dropped: list entries inside it are removed, and variables that only point there go.
+pub fn host_command(program: &str) -> std::process::Command {
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut command = std::process::Command::new(program);
+    #[cfg(target_os = "linux")]
+    if let Ok(appdir) = std::env::var("APPDIR") {
+        let vars = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
+        for (key, value) in host_env_changes(&appdir, vars) {
+            match value {
+                Some(value) => command.env(key, value),
+                None => command.env_remove(key),
+            };
+        }
+    }
+    command
+}
+
+/// The variables to change (`Some`) or remove (`None`) to leave the AppImage's environment.
+#[cfg(target_os = "linux")]
+fn host_env_changes(appdir: &str, vars: impl Iterator<Item = (String, String)>) -> Vec<(String, Option<String>)> {
+    let appdir = appdir.trim_end_matches('/');
+    let inside = |v: &str| (!appdir.is_empty() && v.starts_with(appdir)) || v.starts_with("/tmp/.mount_");
+    let mut changes = vec![];
+    for (key, value) in vars {
+        if matches!(key.as_str(), "APPDIR" | "APPIMAGE" | "ARGV0" | "OWD" | "GTK_THEME") {
+            changes.push((key, None));
+        } else if value.split(':').any(inside) {
+            let kept: Vec<&str> = value.split(':').filter(|e| !e.is_empty() && !inside(e)).collect();
+            changes.push((key, (!kept.is_empty()).then(|| kept.join(":"))));
+        }
+    }
+    changes
+}
+
+/// Opens a file or link with the user's default app, without waiting for it.
+pub fn open_external(target: &str) -> Res<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut last = None;
+        for opener in open::commands(target) {
+            let mut command = host_command(&opener.get_program().to_string_lossy());
+            command.args(opener.get_args()).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            match command.spawn() {
+                Ok(mut child) => {
+                    // Reaped in the background, so finished openers don't linger as zombies.
+                    std::thread::spawn(move || child.wait());
+                    return Ok(());
+                }
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.map_or_else(|| "no way to open files on this system".into(), err))
+    }
+    #[cfg(not(target_os = "linux"))]
+    open::that_detached(target).map_err(err)
 }
 
 #[cfg(target_os = "linux")]
@@ -337,5 +398,28 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(apps.join("oxymail.desktop")).unwrap(), "[Desktop Entry]\nName=OxyMail\nMimeType=x-scheme-handler/mailto;\n");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn leaves_the_appimage_environment_behind() {
+        let app = "/tmp/.mount_OxyMaiAbc";
+        let vars = [
+            ("APPDIR", app.to_string()),
+            ("LD_LIBRARY_PATH", format!("{app}/usr/lib/:/tmp/.mount_OxyMaiOld/usr/lib/:")),
+            ("XDG_DATA_DIRS", format!("{app}/usr/share/:/usr/share:/usr/share/zorin")),
+            ("GIO_MODULE_DIR", format!("{app}//usr/lib/gio/modules")),
+            ("GTK_THEME", "Adwaita:dark".to_string()),
+            ("HOME", "/home/jane".to_string()),
+            ("PATH", "/usr/bin:/bin".to_string()),
+        ];
+        let changes = super::host_env_changes(app, vars.into_iter().map(|(k, v)| (k.to_string(), v)));
+        let get = |k: &str| changes.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+        assert_eq!(get("APPDIR"), Some(None));
+        assert_eq!(get("LD_LIBRARY_PATH"), Some(None));
+        assert_eq!(get("XDG_DATA_DIRS"), Some(Some("/usr/share:/usr/share/zorin".into())));
+        assert_eq!(get("GIO_MODULE_DIR"), Some(None));
+        assert_eq!(get("GTK_THEME"), Some(None));
+        assert_eq!(get("HOME"), None);
+        assert_eq!(get("PATH"), None);
     }
 }
