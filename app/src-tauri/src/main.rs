@@ -448,6 +448,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     desktop::queue_mailto(desktop::mailto_args(&args));
     desktop::refresh_mail_client_registration();
+    desktop::undo_html_default();
     tauri::Builder::default()
         // First, so a second launch hands over to this one before anything else starts.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| desktop::second_instance(app, args)))

@@ -199,11 +199,8 @@ pub fn default_mail_app(app: AppHandle) -> Option<bool> {
     let _ = &app;
     #[cfg(target_os = "linux")]
     {
-        let out = std::process::Command::new("xdg-settings")
-            .args(["check", "default-url-scheme-handler", "mailto", "oxymail.desktop"])
-            .output()
-            .ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim() == "yes")
+        let out = std::process::Command::new("xdg-mime").args(["query", "default", "x-scheme-handler/mailto"]).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim() == LINUX_DESKTOP_FILE)
     }
     #[cfg(target_os = "windows")]
     return Some(crate::windows_shell::is_default_mail_app());
@@ -220,8 +217,10 @@ pub fn make_default_mail_app(app: AppHandle) -> Res<bool> {
     let _ = &app;
     #[cfg(target_os = "linux")]
     {
-        let status = std::process::Command::new("xdg-settings")
-            .args(["set", "default-url-scheme-handler", "mailto", "oxymail.desktop"])
+        // Not `xdg-settings set default-url-scheme-handler`: on GNOME it also makes the app the
+        // default for HTML files (see `undo_html_default`).
+        let status = std::process::Command::new("xdg-mime")
+            .args(["default", LINUX_DESKTOP_FILE, "x-scheme-handler/mailto"])
             .status()
             .map_err(err)?;
         if status.success() { Ok(true) } else { Err("the desktop didn't accept the change".into()) }
@@ -240,6 +239,57 @@ pub fn make_default_mail_app(app: AppHandle) -> Res<bool> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     Err("not available on this system yet".into())
+}
+
+#[cfg(target_os = "linux")]
+const LINUX_DESKTOP_FILE: &str = "oxymail.desktop";
+
+/// Linux: OxyMail up to 0.6.1 became the default mail app through `xdg-settings`, whose GNOME
+/// code also makes the app the default for `text/html` and adds that type to a local copy of
+/// its desktop file. HTML files and attachments then went to OxyMail instead of the browser.
+/// This takes back only those two changes; any other HTML choice the user made stays.
+pub fn undo_html_default() {
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let config = std::env::var_os("XDG_CONFIG_HOME").map(Into::into).or_else(|| home.as_ref().map(|h| h.join(".config")));
+        let data = std::env::var_os("XDG_DATA_HOME").map(Into::into).or_else(|| home.as_ref().map(|h| h.join(".local/share")));
+        undo_html_default_in(config, data);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn undo_html_default_in(config: Option<std::path::PathBuf>, data: Option<std::path::PathBuf>) {
+    {
+        if let Some(path) = config.map(|c| c.join("mimeapps.list")) {
+            edit_lines(&path, |line| {
+                let Some(apps) = line.strip_prefix("text/html=") else { return Some(line.to_string()) };
+                let rest: Vec<&str> = apps.split(';').filter(|a| !a.is_empty() && *a != LINUX_DESKTOP_FILE).collect();
+                (!rest.is_empty()).then(|| format!("text/html={};", rest.join(";")))
+            });
+        }
+        if let Some(path) = data.map(|d| d.join("applications").join(LINUX_DESKTOP_FILE)) {
+            edit_lines(&path, |line| {
+                let Some(types) = line.strip_prefix("MimeType=") else { return Some(line.to_string()) };
+                let rest: Vec<&str> = types.split(';').filter(|t| !t.is_empty() && *t != "text/html").collect();
+                Some(format!("MimeType={};", rest.join(";")))
+            });
+        }
+    }
+}
+
+/// Rewrites a text file line by line (`None` drops the line), only if anything changed.
+#[cfg(target_os = "linux")]
+fn edit_lines(path: &std::path::Path, mut edit: impl FnMut(&str) -> Option<String>) {
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    let lines: Vec<String> = text.lines().filter_map(&mut edit).collect();
+    let mut out = lines.join("\n");
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    if out != text {
+        let _ = std::fs::write(path, out);
+    }
 }
 
 /// Windows: once registered as an email app, keep the registered program path current (an
@@ -268,5 +318,24 @@ pub fn open_urls(app: &AppHandle, urls: Vec<String>) {
     } else {
         // Launched by the link: the UI collects it once it has loaded.
         queue_mailto(links);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[test]
+    fn undoes_only_the_html_default() {
+        let dir = std::env::temp_dir().join(format!("oxymail-html-{}", std::process::id()));
+        let apps = dir.join("applications");
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::write(dir.join("mimeapps.list"), "[Default Applications]\ntext/html=oxymail.desktop\nx-scheme-handler/mailto=oxymail.desktop\n[Added Associations]\ntext/html=oxymail.desktop;brave-browser.desktop;\n").unwrap();
+        std::fs::write(apps.join("oxymail.desktop"), "[Desktop Entry]\nName=OxyMail\nMimeType=text/html;x-scheme-handler/mailto;\n").unwrap();
+        super::undo_html_default_in(Some(dir.clone()), Some(dir.clone()));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("mimeapps.list")).unwrap(),
+            "[Default Applications]\nx-scheme-handler/mailto=oxymail.desktop\n[Added Associations]\ntext/html=brave-browser.desktop;\n"
+        );
+        assert_eq!(std::fs::read_to_string(apps.join("oxymail.desktop")).unwrap(), "[Desktop Entry]\nName=OxyMail\nMimeType=x-scheme-handler/mailto;\n");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
