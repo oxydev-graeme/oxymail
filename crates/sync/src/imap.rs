@@ -69,7 +69,11 @@ pub async fn connect(config: &AccountConfig, password: &str) -> Result<ImapSessi
         timeout(NETWORK_TIMEOUT, client.authenticate("XOAUTH2", auth))
             .await
             .map_err(|_| anyhow!("timed out signing in"))?
-            .map_err(|(e, _)| anyhow!("sign-in was refused: {e}"))?
+            .map_err(|(e, _)| {
+                // A refused token is never worth reusing: the next attempt fetches a new one.
+                crate::oauth::drop_access(&config.email);
+                anyhow!("sign-in was refused: {e}")
+            })?
     } else {
         timeout(NETWORK_TIMEOUT, client.login(&config.username, password))
             .await

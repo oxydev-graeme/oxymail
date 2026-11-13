@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
@@ -60,7 +60,10 @@ pub struct Client {
 }
 
 static CLIENTS: LazyLock<Mutex<HashMap<String, Client>>> = LazyLock::new(Default::default);
-static ACCESS: LazyLock<Mutex<HashMap<String, (String, Instant)>>> = LazyLock::new(Default::default);
+/// Access tokens and when they expire. Wall-clock time, not `Instant`: on Linux and macOS
+/// `Instant` stops while the computer sleeps, so after a night asleep an expired token
+/// looked fresh and every sign-in was refused.
+static ACCESS: LazyLock<Mutex<HashMap<String, (String, SystemTime)>>> = LazyLock::new(Default::default);
 
 /// Registers (or clears, with `None`) the client used for a provider. Called by the app at
 /// start-up and whenever the user changes it in Settings.
@@ -156,10 +159,9 @@ pub async fn sign_in(provider_id: &str, email: &str) -> Result<String> {
 
 /// A current access token for `email`, renewing it with the stored refresh token if needed.
 pub async fn access_token(provider_id: &str, email: &str) -> Result<String> {
-    if let Some((token, expires)) = ACCESS.lock().ok().and_then(|a| a.get(email).cloned())
-        && Instant::now() + Duration::from_secs(60) < expires {
-            return Ok(token);
-        }
+    if let Some(token) = cached_access(email) {
+        return Ok(token);
+    }
     let provider = provider(provider_id)?;
     let client = client(provider)?;
     let refresh = secrets::refresh_token(email)?;
@@ -182,6 +184,19 @@ pub async fn access_token(provider_id: &str, email: &str) -> Result<String> {
     Ok(tokens.access_token)
 }
 
+/// The cached access token for `email`, unless it expires within a minute.
+fn cached_access(email: &str) -> Option<String> {
+    let (token, expires) = ACCESS.lock().ok()?.get(email).cloned()?;
+    (SystemTime::now() + Duration::from_secs(60) < expires).then_some(token)
+}
+
+/// Drops the cached access token after the server refused it, so the next attempt renews it.
+pub fn drop_access(email: &str) {
+    if let Ok(mut access) = ACCESS.lock() {
+        access.remove(email);
+    }
+}
+
 pub fn forget(email: &str) {
     if let Ok(mut access) = ACCESS.lock() {
         access.remove(email);
@@ -192,7 +207,7 @@ pub fn forget(email: &str) {
 fn cache_access(email: &str, tokens: &TokenResponse) {
     let lifetime = Duration::from_secs(tokens.expires_in.unwrap_or(3600));
     if let Ok(mut access) = ACCESS.lock() {
-        access.insert(email.to_string(), (tokens.access_token.clone(), Instant::now() + lifetime));
+        access.insert(email.to_string(), (tokens.access_token.clone(), SystemTime::now() + lifetime));
     }
 }
 
@@ -310,5 +325,24 @@ mod tests {
     fn pkce_tokens_are_url_safe() {
         let t = random_token(48).unwrap();
         assert!(t.len() >= 43 && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+}
+
+#[cfg(test)]
+mod token_cache_tests {
+    use super::*;
+
+    #[test]
+    fn a_token_past_its_wall_clock_expiry_is_not_reused() {
+        let now = SystemTime::now();
+        let mut access = ACCESS.lock().unwrap();
+        // As after a night's sleep: issued nine hours ago with a one-hour lifetime.
+        access.insert("slept@example.com".into(), ("old".into(), now - Duration::from_secs(8 * 3600)));
+        access.insert("fresh@example.com".into(), ("new".into(), now + Duration::from_secs(3600)));
+        drop(access);
+        assert_eq!(cached_access("slept@example.com"), None);
+        assert_eq!(cached_access("fresh@example.com").as_deref(), Some("new"));
+        drop_access("fresh@example.com");
+        assert_eq!(cached_access("fresh@example.com"), None);
     }
 }
