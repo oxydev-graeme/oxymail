@@ -301,6 +301,11 @@
           <p class="hint">Sent with the message, so people see the same font.</p>
         </div>
         <label class="toggle">
+          <input type="checkbox" checked={settings.compose_window !== "false"} onchange={toggle("compose_window")} />
+          <span>Write messages in a window of their own</span>
+        </label>
+        <p class="hint push">Move it aside or onto another screen, and keep reading and copying from your mail while you write.</p>
+        <label class="toggle">
           <input type="checkbox" checked={settings.show_cc_bcc === "true"} onchange={toggle("show_cc_bcc")} />
           <span>Always show the Cc and Bcc fields</span>
         </label>

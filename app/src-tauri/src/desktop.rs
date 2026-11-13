@@ -67,7 +67,9 @@ pub fn setting_on(app: &AppHandle, key: &str, default: bool) -> bool {
 /// Closing the window keeps OxyMail running in the tray (checking mail, notifying) unless
 /// "Quit OxyMail when the window is closed" is on.
 pub fn close_requested(window: &tauri::Window, api: &tauri::CloseRequestApi) {
-    if window.label() == "main" && !setting_on(window.app_handle(), "quit_on_close", false) {
+    // The main window sends what Compose windows hand it, so it stays (hidden) while any are open.
+    let composing = window.app_handle().webview_windows().keys().any(|l| l.starts_with("compose-"));
+    if window.label() == "main" && (composing || !setting_on(window.app_handle(), "quit_on_close", false)) {
         api.prevent_close();
         let _ = window.hide();
     }

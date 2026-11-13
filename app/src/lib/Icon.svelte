@@ -16,6 +16,7 @@
     minimize: "M6 12h12",
     maximize: "M6 6h12v12H6z",
     unmaximize: "M8 8h10v10H8zM6 15V6h9",
+    popout: "M14 4h6v6M20 4l-8 8M18 14v6H4V6h6",
     close: "M6 6l12 12M18 6L6 18",
     clip: "M20 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8",
     x: "M7 7l10 10M17 7L7 17",

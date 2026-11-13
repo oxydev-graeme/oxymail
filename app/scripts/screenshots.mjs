@@ -10,7 +10,8 @@ const dist = process.argv[2];
 const out = process.argv[3];
 const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".svg": "image/svg+xml" };
 const server = createServer(async (req, res) => {
-  const path = join(dist, req.url === "/" ? "index.html" : req.url.split("?")[0]);
+  const url = req.url.split("?")[0];
+  const path = join(dist, url === "/" ? "index.html" : url);
   try {
     res.writeHead(200, { "content-type": types[extname(path)] ?? "application/octet-stream" });
     res.end(await readFile(path));
@@ -44,7 +45,7 @@ const mock = () => {
     notices: ["Attachment not available: SWIFT_PO#000000000000.zip (4533 bytes)"],
     from_addr: "maria@coastline-appliances.example", has_remote_content: true, images_allowed: false,
     unsubscribe: ["https://example.com/unsubscribe"] });
-  const settings = { theme: window.__THEME__ ?? "system", density: "comfortable", mark_read_on_open: "true", ...(window.__SETTINGS__ ?? {}) };
+  const settings = { theme: window.__THEME__ ?? "system", density: "comfortable", mark_read_on_open: "true", compose_window: "false", ...(window.__SETTINGS__ ?? {}) };
   const handlers = {
     accounts: () => accounts, folders: ({ accountId }) => folders(accountId), messages: ({ folderId, offset }) => (offset ? [] : msgs(folderId)),
     message: ({ id }) => view(id), settings: () => settings, set_setting: () => null, data_location: () => "/home/jane/.local/share/oxymail/oxymail.db",
@@ -105,12 +106,23 @@ const mock = () => {
       source: "your Mailbird settings (POP3 there; OxyMail uses IMAP on the same server)",
       imap: { host: "mail.larkspur.example", port: 993, security: "tls" }, smtp: { host: "mail.larkspur.example", port: 465, security: "tls" } }),
     discover_account: ({ email }) => ({ email, username: email, source: "Mozilla's ISP database (via MX)", oauth: "google",
-      imap: { host: "imap.gmail.com", port: 993, security: "tls" }, smtp: { host: "smtp.gmail.com", port: 465, security: "tls" } }), "plugin:event|listen": () => 1, "plugin:event|unlisten": () => null,
+      imap: { host: "imap.gmail.com", port: 993, security: "tls" }, smtp: { host: "smtp.gmail.com", port: 465, security: "tls" } }), "plugin:event|listen": ({ event, handler }) => ((listeners[event] ??= []).push(callbacks[handler]), handler), "plugin:event|unlisten": () => null,
+    // A Compose window asks the main window for its draft; answer as the main window would.
+    "plugin:event|emit_to": ({ event, payload }) => {
+      if (event !== "compose-window-ready") return null;
+      const draft = { account_id: 9, to: "Peter Mabaso <peter@riverbend.example>", subject: "Re: Site visit on Thursday",
+        quote: "<div>On Tue, 10 Nov 2026, Peter Mabaso wrote:</div><blockquote>Can we move the site visit to Thursday morning?</blockquote>" };
+      const reply = { label: payload.label, draft, accounts: accounts.filter((a) => a.kind === "imap"), settings };
+      setTimeout(() => (listeners["compose-window-draft"] ?? []).forEach((f) => f({ event: "compose-window-draft", payload: reply })), 50);
+      return null;
+    },
   };
   let cb = 0;
+  const callbacks = {}, listeners = {};
+  const label = new URLSearchParams(location.search).get("compose") ?? "main";
   window.__TAURI_INTERNALS__ = {
-    metadata: { currentWindow: { label: "main" }, currentWebview: { windowLabel: "main", label: "main" } },
-    transformCallback: () => ++cb,
+    metadata: { currentWindow: { label }, currentWebview: { windowLabel: label, label } },
+    transformCallback: (fn) => ((callbacks[++cb] = fn), cb),
     unregisterCallback: () => {},
     invoke: async (cmd, args) => (handlers[cmd] ? handlers[cmd](args ?? {}) : null),
   };
@@ -228,13 +240,22 @@ const shots = [
     await p.mouse.move(g.x + 6, g.y + 6); await p.mouse.down(); await p.mouse.move(g.x - 200, g.y - 150, { steps: 8 }); await p.mouse.up();
   }],
   ["compose-maximized", 1360, 860, "dark", async (p) => { await p.click(".compose-btn"); await p.click(".compose header button[title='Maximise']"); }],
+  // Compose floating over the app no longer blocks it: the message list is still clickable.
+  ["compose-nonmodal", 1360, 860, "dark", async (p) => {
+    await p.click(".compose-btn");
+    await p.click("button:has-text('All inboxes')", { timeout: 3000 });
+  }],
+  // A message in a window of its own (Settings → Composing).
+  ["compose-window", 860, 720, "dark", async () => {}, {}, "/?compose=compose-1", ".compose .editor"],
+  ["compose-window-light", 860, 720, "light", async () => {}, {}, "/?compose=compose-1", ".compose .editor"],
+  ["compose-window-small", 520, 400, "dark", async () => {}, {}, "/?compose=compose-1", ".compose .editor"],
 ];
-for (const [name, w, h, theme, act, extra] of shots) {
+for (const [name, w, h, theme, act, extra, path = "/", ready = ".row-main"] of shots) {
   const page = await browser.newPage({ viewport: { width: w, height: h }, colorScheme: theme });
   await page.addInitScript(`window.__THEME__=${JSON.stringify(theme)};window.__SETTINGS__=${JSON.stringify(extra ?? {})};(${mock.toString()})()`);
   page.on("pageerror", (e) => console.log(name, "PAGE ERROR", e.message));
-  await page.goto("http://localhost:4317/");
-  await page.waitForSelector(".row-main");
+  await page.goto(`http://localhost:4317${path}`);
+  await page.waitForSelector(ready);
   await act(page);
   await page.waitForTimeout(400);
   // Report anything wider than the window and any scroll container that cannot scroll.

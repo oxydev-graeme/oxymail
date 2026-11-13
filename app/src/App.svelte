@@ -9,6 +9,8 @@
   import MailbirdImport from "./lib/MailbirdImport.svelte";
   import Avatar from "./lib/Avatar.svelte";
   import Compose from "./lib/Compose.svelte";
+  import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+  import { emitTo } from "@tauri-apps/api/event";
   import MovePicker from "./lib/MovePicker.svelte";
   import FilterFromMessage from "./lib/FilterFromMessage.svelte";
   import TimeMenu from "./lib/TimeMenu.svelte";
@@ -101,7 +103,7 @@
   function composeTo(email, name) {
     mode = "mail";
     const to = name && name !== email ? `${name.replace(/[<>",]/g, "")} <${email}>` : email;
-    composing = { account_id: liveAccounts[0]?.id, to };
+    openCompose({ account_id: liveAccounts[0]?.id, to });
   }
 
   function searchFor(q) {
@@ -181,16 +183,18 @@
     flash("Back in its folder");
   }
 
-  async function scheduleFromCompose(accountId, mail, reopen, at) {
+  /** `fromWindow`: the message came from a Compose window, not the one over the app. */
+  async function scheduleFromCompose(accountId, mail, reopen, at, fromWindow = false) {
     try {
       await api.scheduleSend(accountId, at, mail, JSON.stringify(reopen));
       if (reopen.draft_id) await api.deleteDraft(reopen.draft_id).catch(() => {});
-      composing = null;
+      if (!fromWindow) composing = null;
       refreshDrafts();
       refreshQueues();
       flash(`Scheduled for ${when(at)}`);
     } catch (e) {
-      error = String(e);
+      if (!fromWindow) error = String(e);
+      else openCompose({ ...reopen, error: `Not scheduled: ${e}` });
     }
   }
 
@@ -198,7 +202,7 @@
     if (!confirm("Stop this scheduled message and open it for editing?")) return;
     try {
       const draft = await api.unschedule(x.id);
-      composing = JSON.parse(draft);
+      openCompose(JSON.parse(draft));
       refreshQueues();
     } catch (e) {
       error = String(e);
@@ -356,6 +360,7 @@
     });
     listen("compose-mailto", ({ payload }) => composeMailto(payload));
     listen("compose-new", () => compose());
+    listenForComposeWindows();
     // A mailto: link OxyMail was started with (from a browser or another app).
     api.takeMailto().then((links) => links.forEach(composeMailto)).catch(() => {});
     listen("sync-error", ({ payload }) => {
@@ -365,7 +370,7 @@
 
   function composeMailto(link) {
     const m = parseMailto(link);
-    composing = { account_id: sendingAccount(selected), to: m.to, cc: m.cc, subject: m.subject, quote: m.body ? escapeHtml(m.body) : undefined };
+    openCompose({ account_id: sendingAccount(selected), to: m.to, cc: m.cc, subject: m.subject, quote: m.body ? escapeHtml(m.body) : undefined });
   }
 
   // Whole-app text size (Settings → Appearance), as the webview's own zoom so every
@@ -401,7 +406,77 @@
   }
 
   function compose() {
-    composing = { account_id: account && isLive(account) ? account.id : liveAccounts[0]?.id };
+    openCompose({ account_id: account && isLive(account) ? account.id : liveAccounts[0]?.id });
+  }
+
+  // ---- Compose windows -------------------------------------------------------
+  // Each message can be written in a window of its own (Settings → Composing), so this window
+  // stays usable. The window asks for its draft once it has loaded, and hands the message back
+  // here to send, so Undo and the drafts list work the same either way.
+
+  /** Drafts waiting for their window to load, by window label. */
+  const pendingCompose = new Map();
+  const COMPOSE_SIZE_KEY = "oxymail.compose.window";
+
+  /** Opens Compose: in its own window when that's set and possible, else over the app. */
+  function openCompose(draft, ownWindow = settings.compose_window !== "false") {
+    // One message is already being written over the app: the next gets a window of its own.
+    if (composing) ownWindow = true;
+    if (!ownWindow || !("__TAURI_INTERNALS__" in window)) return (composing = draft);
+    const label = `compose-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    pendingCompose.set(label, draft);
+    let size = null;
+    try {
+      size = JSON.parse(localStorage.getItem(COMPOSE_SIZE_KEY) ?? "null");
+    } catch {}
+    const win = new WebviewWindow(label, {
+      url: `index.html?compose=${label}`,
+      title: draft.subject ? `${draft.subject} — OxyMail` : "New message — OxyMail",
+      width: size?.width ?? 860,
+      height: size?.height ?? 720,
+      minWidth: 480,
+      minHeight: 360,
+      center: true,
+      focus: true,
+    });
+    // If the window can't be made, fall back to Compose over the app.
+    win.once("tauri://error", () => {
+      if (pendingCompose.delete(label)) composing = draft;
+    });
+  }
+
+  function listenForComposeWindows() {
+    listen("compose-window-ready", async ({ payload }) => {
+      const draft = pendingCompose.get(payload.label);
+      if (!draft) return;
+      pendingCompose.delete(payload.label);
+      const s = $state.snapshot(settings);
+      await emitTo(payload.label, "compose-window-draft", { label: payload.label, draft, accounts: $state.snapshot(liveAccounts), settings: s });
+      rememberComposeSize(payload.label);
+    });
+    listen("compose-window-send", ({ payload }) => queueSend(payload.accountId, payload.mail, payload.reopen, true));
+    listen("compose-window-schedule", ({ payload }) => scheduleFromCompose(payload.accountId, payload.mail, payload.reopen, payload.at, true));
+    listen("compose-window-closed", ({ payload }) => {
+      refreshDrafts();
+      if (payload.kept) flash("Saved to Drafts");
+    });
+  }
+
+  /** Remembers the size a Compose window is given, for the next one. */
+  async function rememberComposeSize(label) {
+    const win = await WebviewWindow.getByLabel(label);
+    if (!win) return;
+    let timer;
+    win.onResized(() => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        try {
+          const factor = await win.scaleFactor();
+          const { width, height } = (await win.innerSize()).toLogical(factor);
+          localStorage.setItem(COMPOSE_SIZE_KEY, JSON.stringify({ width: Math.round(width), height: Math.round(height) }));
+        } catch {}
+      }, 400);
+    });
   }
 
   function reply(all = false) {
@@ -409,7 +484,7 @@
     const own = ownAddresses();
     const primary = (view.reply_to.length ? view.reply_to : view.from).map(emailOf);
     const others = all ? [...view.to, ...view.cc].map(emailOf).filter((e) => !own.has(e.toLowerCase()) && !primary.includes(e)) : [];
-    composing = {
+    openCompose({
       account_id: sendingAccount(selected),
       to: primary.join(", "),
       cc: others.join(", "),
@@ -417,7 +492,7 @@
       in_reply_to: view.message_id,
       references: [...view.references, view.message_id].filter(Boolean),
       quote: `<div>On ${escapeHtml(longDate(view.date))}, ${escapeHtml(view.from.join(", "))} wrote:</div><blockquote>${originalHtml(view)}</blockquote>`,
-    };
+    });
   }
 
   function forward() {
@@ -430,13 +505,13 @@
     ]
       .map(([k, v]) => `<b>${k}:</b> ${escapeHtml(v)}`)
       .join("<br>");
-    composing = {
+    openCompose({
       account_id: sendingAccount(selected),
       subject: prefixed("Fwd", view.subject ?? ""),
       quote: `<div>---------- Forwarded message ----------<br>${head}</div><br>${originalHtml(view)}`,
       forward_from: view.id,
       forwarded: view.attachments.map(({ index, name, size }) => ({ index, name, size })),
-    };
+    });
   }
 
   async function loadAccounts() {
@@ -689,7 +764,7 @@
 
   /** Ctrl/Cmd-click toggles a message in the selection; Shift-click selects a range. */
   function rowClick(event, m) {
-    if (m.draft) return (composing = JSON.parse(m.draft.body));
+    if (m.draft) return openCompose(JSON.parse(m.draft.body));
     if (m.scheduled) return editScheduled(m.scheduled);
     if (event.ctrlKey || event.metaKey) {
       selectedIds = selectedIds.includes(m.id) ? selectedIds.filter((x) => x !== m.id) : [...selectedIds, m.id];
@@ -797,7 +872,7 @@
       if (confirm("Open the sender's unsubscribe page in your browser?")) act(() => api.openUrl(web));
     } else if (mail) {
       const m = parseMailto(mail);
-      composing = { account_id: sendingAccount(selected), to: m.to, subject: m.subject || "Unsubscribe", note: "This is the sender's unsubscribe address." };
+      openCompose({ account_id: sendingAccount(selected), to: m.to, subject: m.subject || "Unsubscribe", note: "This is the sender's unsubscribe address." });
     }
   }
 
@@ -958,8 +1033,8 @@
   // ---- Sending with undo ----------------------------------------------------
 
   /** Holds a message for the undo window, then sends it. Undo or failure reopens Compose. */
-  function queueSend(accountId, mail, reopen) {
-    composing = null;
+  function queueSend(accountId, mail, reopen, fromWindow = false) {
+    if (!fromWindow) composing = null;
     const seconds = Number(settings.undo_send_seconds) || 0;
     const send = async () => {
       try {
@@ -967,14 +1042,14 @@
         if (reopen.draft_id) await api.deleteDraft(reopen.draft_id).catch(() => {});
         refreshDrafts();
       } catch (e) {
-        composing = { ...reopen, error: `Not sent: ${e}` };
+        openCompose({ ...reopen, error: `Not sent: ${e}` });
       }
     };
     if (!seconds) return send();
     const timer = setTimeout(send, seconds * 1000);
     flash(`Sending in ${seconds} seconds…`, () => {
       clearTimeout(timer);
-      composing = reopen;
+      openCompose(reopen);
     }, seconds * 1000);
   }
 
@@ -1489,6 +1564,7 @@
     {settings}
     onsend={queueSend}
     onschedule={scheduleFromCompose}
+    onpopout={(draft) => { composing = null; openCompose(draft, true); }}
     onclose={(kept) => { composing = null; refreshDrafts(); if (kept) flash("Saved to Drafts"); }}
   />
 {/if}

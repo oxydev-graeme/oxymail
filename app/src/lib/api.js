@@ -120,6 +120,8 @@ export const DEFAULT_SETTINGS = {
   start_minimized: "true",
   quit_on_close: "false",
   undo_send_seconds: "8",
+  /** New messages open in a window of their own, so the main window stays usable. */
+  compose_window: "true",
   /** Whole-app and email text size, as a percentage. */
   app_zoom: "100",
   email_zoom: "100",

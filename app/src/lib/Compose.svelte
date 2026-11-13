@@ -11,8 +11,10 @@
    * accounts: live accounts that can send.
    * onsend(accountId, mail, reopen): hands the message over; `reopen` is the draft to bring back
    * if the send is undone or fails.
+   * windowed: fills a window of its own (ComposeWindow) instead of floating over the app.
+   * onpopout(draft): moves the message into its own window; onsubject(subject): for the title.
    */
-  let { draft, accounts, settings = {}, onclose, onsend, onschedule } = $props();
+  let { draft, accounts, settings = {}, onclose, onsend, onschedule, onpopout = null, onsubject = null, windowed = false } = $props();
   // Settings → Composing: the font new messages are written in, applied to what's sent too.
   const bodyStyle = untrack(() => composeStyle(settings));
   let pickingTime = $state(false);
@@ -32,6 +34,9 @@
   let editor = $state();
 
   let account = $derived(accounts.find((a) => a.id === accountId));
+  let root = $state();
+
+  $effect(() => onsubject?.(subject));
 
   // ---- Autosave to local drafts --------------------------------------------
   let draftId = $state(initial.draft_id ?? null);
@@ -147,7 +152,7 @@
   }
 
   /** Closing keeps the message as a draft; Discard throws it away. */
-  async function close() {
+  export async function close() {
     clearTimeout(saveTimer);
     if (hasContent()) {
       await saveDraft();
@@ -229,7 +234,16 @@
 
   const EDGES = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
 
+  /** Saves what's written so far and hands it to a window of its own. */
+  async function popOut() {
+    clearTimeout(saveTimer);
+    await saveDraft();
+    onpopout({ ...snapshot(), account_id: accountId });
+  }
+
   function onKey(event) {
+    // Floating over the app, Compose only takes keys typed inside it: the app behind stays usable.
+    if (!windowed && !root?.contains(event.target)) return;
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
       send();
@@ -241,10 +255,11 @@
 
 <svelte:window onkeydown={onKey} onresize={() => (box = clamp(box))} />
 
-<div class="backdrop">
+<div class="backdrop" class:windowed>
   <div
+    bind:this={root}
     class="compose"
-    class:maximized
+    class:maximized={maximized && !windowed}
     role="dialog"
     aria-label="New message"
     style:left="{box.x}px"
@@ -252,9 +267,13 @@
     style:width="{box.w}px"
     style:height="{box.h}px"
   >
+    {#if !windowed}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <header onpointerdown={(e) => startDrag(e)} ondblclick={(e) => !e.target.closest("button") && toggleMaximized()}>
       <span class="title">{subject || "New message"}</span>
+      {#if onpopout}
+        <button class="icon" onclick={popOut} title="Open in its own window"><Icon name="popout" size={16} /></button>
+      {/if}
       <button class="icon" onclick={toggleMaximized} title={maximized ? "Restore size" : "Maximise"}>
         <Icon name={maximized ? "unmaximize" : "maximize"} size={16} />
       </button>
@@ -265,6 +284,7 @@
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="grip {edge}" onpointerdown={(e) => startDrag(e, edge)}></div>
       {/each}
+    {/if}
     {/if}
 
     {#if !accounts.length}
@@ -346,7 +366,10 @@
 {/if}
 
 <style>
-  .backdrop { position: fixed; inset: 0; background: rgb(10 14 20 / 0.25); z-index: 25; }
+  /* Not modal: clicks pass through to the app around the floating window. */
+  .backdrop { position: fixed; inset: 0; z-index: 25; pointer-events: none; }
+  .compose { pointer-events: auto; }
+  .windowed .compose { inset: 0 !important; width: auto !important; height: auto !important; border: 0; border-radius: 0; box-shadow: none; }
   .compose {
     position: absolute;
     display: flex;
@@ -354,7 +377,7 @@
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 12px;
-    box-shadow: 0 20px 60px rgb(0 0 0 / 0.3);
+    box-shadow: 0 20px 60px rgb(0 0 0 / 0.3), 0 0 0 1px rgb(0 0 0 / 0.08);
     overflow: hidden;
   }
   .compose.maximized { left: 8px !important; top: 8px !important; width: calc(100% - 16px) !important; height: calc(100% - 16px) !important; }
