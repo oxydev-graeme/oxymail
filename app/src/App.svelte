@@ -18,6 +18,7 @@
   import ContactsView from "./lib/ContactsView.svelte";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { findUpdate, installUpdate } from "./lib/updates.js";
+  import { sidebarBackground } from "./lib/sidebarBackground.js";
 
   const PAGE = 200;
   const appWindow = getCurrentWindow();
@@ -314,6 +315,13 @@
     else root.dataset.theme = settings.theme;
   });
 
+  // Whether the dark theme is showing, so the sidebar background can use its dark version.
+  const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  let systemDark = $state(darkQuery.matches);
+  darkQuery.addEventListener("change", (e) => (systemDark = e.matches));
+  let dark = $derived(settings.theme === "dark" || (settings.theme === "system" && systemDark));
+  let sidebarBg = $derived(sidebarBackground(settings, dark));
+
   onMount(async () => {
     try {
       settings = { ...DEFAULT_SETTINGS, ...(await api.settings()) };
@@ -450,7 +458,8 @@
       const draft = pendingCompose.get(payload.label);
       if (!draft) return;
       pendingCompose.delete(payload.label);
-      const s = $state.snapshot(settings);
+      // The sidebar pictures are large and a compose window has no sidebar.
+      const { sidebar_image_light, sidebar_image_dark, ...s } = $state.snapshot(settings);
       await emitTo(payload.label, "compose-window-draft", { label: payload.label, draft, accounts: $state.snapshot(liveAccounts), settings: s });
       rememberComposeSize(payload.label);
     });
@@ -1164,7 +1173,7 @@
         ondblclick={() => resetColumn("list_width")}
       ></div>
     {/if}
-    <aside class="sidebar">
+    <aside class="sidebar" style:background={sidebarBg || null}>
       <div class="modes" role="tablist">
         {#each [["mail", "mailbox", "Mail"], ["calendar", "calendar", "Calendar"], ["contacts", "contacts", "Contacts"]] as [id, icon, label]}
           <button role="tab" aria-selected={mode === id} class:on={mode === id} onclick={() => (mode = id)} title={label}>
@@ -1523,6 +1532,7 @@
   <Settings
     {settings}
     {accounts}
+    {dark}
     onchange={changeSetting}
     onclose={() => (showSettings = false)}
     onimported={loadAccounts}
@@ -1624,7 +1634,7 @@
   .compose-btn:hover { background: var(--brand) !important; }
   .spinning :global(svg) { animation: spin 1s linear infinite; color: var(--accent); }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .status { position: sticky; bottom: -12px; display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 8px 16px; font-size: 12px; color: var(--muted); background: var(--sidebar); border-top: 1px solid var(--border); }
+  .status { position: sticky; bottom: -12px; display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 8px 16px; font-size: 12px; color: var(--muted); background: color-mix(in srgb, var(--sidebar) 94%, transparent); border-top: 1px solid var(--border); }
   .status .bad { color: var(--danger); }
   .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0; animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: 0.3; } }
@@ -1667,10 +1677,10 @@
   .side-actions.top { border-top: 0; margin-top: 4px; }
   .side-actions button { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; font-size: 13px; color: var(--muted); text-align: left; }
   .side-actions button:hover { background: var(--hover); color: var(--text); }
-  .side-hint { margin: 4px 16px; font-size: 12px; color: var(--faint); line-height: 1.5; }
+  .side-hint { margin: 4px 16px; font-size: 12px; color: var(--muted); line-height: 1.5; }
   .mode-pane { grid-column: 2 / 4; min-width: 0; min-height: 0; }
   .sidebar { overflow-y: auto; background: var(--sidebar); border-right: 1px solid var(--border); min-width: 0; min-height: 0; padding-bottom: 12px; }
-  .section { padding: 12px 16px 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
+  .section { padding: 12px 16px 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
   .folders-head { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 12px; display: flex; }
   .accounts, .folders { padding: 0 8px; }
   .account { position: relative; display: flex; align-items: center; border-radius: 7px; }

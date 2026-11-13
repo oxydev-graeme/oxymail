@@ -245,6 +245,42 @@ const shots = [
     await p.click(".compose-btn");
     await p.click("button:has-text('All inboxes')", { timeout: 3000 });
   }],
+  // Sidebar backgrounds (Settings → Appearance): each has a light and a dark version.
+  ["sidebar-preset-dark", 1360, 860, "dark", async (p) => { await p.click(".row-main"); }, { sidebar_bg: "lagoon" }],
+  ["sidebar-preset-light", 1360, 860, "light", async (p) => { await p.click(".row-main"); }, { sidebar_bg: "dawn" }],
+  ["sidebar-color-dark", 1360, 860, "dark", async () => {}, { sidebar_bg: "color", sidebar_color: "#ff0080" }],
+  ["sidebar-color-light", 900, 600, "light", async () => {}, { sidebar_bg: "color", sidebar_color: "#ff0080" }],
+  ["settings-sidebar-bg", 1360, 860, "dark", async (p) => {
+    await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Appearance")');
+    await p.click('.swatch:has-text("Meadow")');
+  }],
+  ["settings-sidebar-bg-light", 1360, 860, "light", async (p) => {
+    await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Appearance")');
+    await p.click('.swatch:has-text("Lavender")');
+  }],
+  ...["dark", "light"].map((theme) => [`sidebar-picture-${theme}`, 1360, 860, theme, async (p) => {
+    // A deliberately hard picture: pure white, pure black and vivid colours.
+    const art = await browser.newPage({ viewport: { width: 400, height: 600 } });
+    await art.setContent(`<body style="margin:0;height:600px;background:linear-gradient(160deg,#fff 0 20%,#000 20% 35%,#ff0 35% 50%,#00f 50% 65%,#f0f 65% 80%,#0f8 80%)"></body>`);
+    const buffer = await art.screenshot();
+    await art.close();
+    await p.click('button[title="Settings"]'); await p.click('.dialog nav button:text-is("Appearance")');
+    await p.locator('.picture-row input[type="file"]').setInputFiles({ name: "test.png", mimeType: "image/png", buffer });
+    await p.waitForSelector('.swatch:has-text("Picture")');
+    await p.click(".dialog .close");
+    const range = await p.evaluate(async () => {
+      const src = getComputedStyle(document.querySelector(".sidebar")).backgroundImage.match(/url\("(.*)"\)/)?.[1];
+      const img = new Image(); img.src = src; await img.decode();
+      const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
+      const x = c.getContext("2d"); x.drawImage(img, 0, 0);
+      const d = x.getImageData(0, 0, c.width, c.height).data;
+      const lin = (v) => ((v /= 255) <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+      let lo = 1, hi = 0;
+      for (let i = 0; i < d.length; i += 4) { const y = 0.2126 * lin(d[i]) + 0.7152 * lin(d[i + 1]) + 0.0722 * lin(d[i + 2]); lo = Math.min(lo, y); hi = Math.max(hi, y); }
+      return [lo.toFixed(3), hi.toFixed(3)];
+    });
+    console.log(`CHECK picture luminance (${theme}):`, range.join("–"), theme === "dark" ? "(need ≤ 0.041)" : "(need ≥ 0.821)");
+  }]),
   // A message in a window of its own (Settings → Composing).
   ["compose-window", 860, 720, "dark", async () => {}, {}, "/?compose=compose-1", ".compose .editor"],
   ["compose-window-light", 860, 720, "light", async () => {}, {}, "/?compose=compose-1", ".compose .editor"],

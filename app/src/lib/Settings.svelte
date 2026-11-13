@@ -7,8 +7,9 @@
   import SignInSettings from "./SignInSettings.svelte";
   import MailbirdImport from "./MailbirdImport.svelte";
   import FiltersSettings from "./FiltersSettings.svelte";
+  import { PRESETS, sidebarBackground, tonePicture } from "./sidebarBackground.js";
 
-  let { settings, accounts, onchange, onclose, onimported, onaccountschanged, oncheckupdates, update = null, updating = null, oninstallupdate } = $props();
+  let { settings, accounts, dark = false, onchange, onclose, onimported, onaccountschanged, oncheckupdates, update = null, updating = null, oninstallupdate } = $props();
   let version = $state("");
 
   let section = $state("general");
@@ -75,6 +76,39 @@
     }
   }
   let alertText = $state("");
+
+  // ---- Sidebar background ----
+  const bgKind = $derived(settings.sidebar_bg || "");
+  const bgPreview = (overrides) => sidebarBackground({ ...settings, ...overrides }, dark) || "var(--sidebar)";
+  let pictureInput = $state();
+  let pictureBusy = $state(false);
+  let pictureError = $state("");
+  async function pickColor(e) {
+    await onchange("sidebar_color", e.currentTarget.value);
+    await onchange("sidebar_bg", "color");
+  }
+  async function pickPicture(e) {
+    const file = e.currentTarget.files?.[0];
+    e.currentTarget.value = "";
+    if (!file) return;
+    pictureBusy = true;
+    pictureError = "";
+    try {
+      const { light, dark: deep } = await tonePicture(file);
+      await onchange("sidebar_image_light", light);
+      await onchange("sidebar_image_dark", deep);
+      await onchange("sidebar_bg", "image");
+    } catch {
+      pictureError = "That file couldn't be opened as a picture. Try a JPEG, PNG or WebP.";
+    } finally {
+      pictureBusy = false;
+    }
+  }
+  async function removePicture() {
+    if (bgKind === "image") await onchange("sidebar_bg", "");
+    await onchange("sidebar_image_light", "");
+    await onchange("sidebar_image_dark", "");
+  }
 
   const on = (key) => settings[key] !== "false";
   const toggle = (key) => (e) => onchange(key, String(e.currentTarget.checked));
@@ -203,6 +237,40 @@
               <button class:on={settings.theme === value} onclick={() => onchange("theme", value)}>{label}</button>
             {/each}
           </div>
+        </div>
+        <div class="field">
+          <div class="label" id="sidebar-bg-label">Sidebar background</div>
+          <div class="swatches" role="group" aria-labelledby="sidebar-bg-label">
+            <button class="swatch" aria-pressed={bgKind === ""} onclick={() => onchange("sidebar_bg", "")} style:background="var(--sidebar)">
+              <span class="sample" aria-hidden="true">Aa<i></i></span><span class="name">Plain</span>
+            </button>
+            {#each PRESETS as p (p.id)}
+              <button class="swatch" aria-pressed={bgKind === p.id} onclick={() => onchange("sidebar_bg", p.id)} style:background={bgPreview({ sidebar_bg: p.id })}>
+                <span class="sample" aria-hidden="true">Aa<i></i></span><span class="name">{p.name}</span>
+              </button>
+            {/each}
+            <label class="swatch" class:on={bgKind === "color"} style:background={bgPreview({ sidebar_bg: "color", sidebar_color: settings.sidebar_color || "#c2410c" })}>
+              <input class="hidden-input" type="color" value={settings.sidebar_color || "#c2410c"} onchange={pickColor} aria-label={bgKind === "color" ? "Your own colour, in use. Choose another" : "Your own colour"} aria-describedby="sidebar-bg-hint" />
+              <span class="sample" aria-hidden="true">Aa<i></i></span><span class="name">Colour…</span><span class="wheel" aria-hidden="true"></span>
+            </label>
+            {#if settings.sidebar_image_light}
+              <button class="swatch" aria-pressed={bgKind === "image"} onclick={() => onchange("sidebar_bg", "image")} style:background={bgPreview({ sidebar_bg: "image" })}>
+                <span class="sample" aria-hidden="true">Aa<i></i></span><span class="name">Picture</span>
+              </button>
+            {/if}
+          </div>
+          <div class="picture-row">
+            <button class="link-btn" disabled={pictureBusy} onclick={() => pictureInput.click()}>
+              <Icon name="image" size={14} />
+              {pictureBusy ? "Preparing the picture…" : settings.sidebar_image_light ? "Choose another picture…" : "Use a picture…"}
+            </button>
+            {#if settings.sidebar_image_light && !pictureBusy}
+              <button class="link-btn" onclick={removePicture}>Remove picture</button>
+            {/if}
+            <input bind:this={pictureInput} class="hidden-input" type="file" accept="image/*" tabindex="-1" aria-hidden="true" onchange={pickPicture} />
+          </div>
+          {#if pictureError}<p class="hint bad" role="alert">{pictureError}</p>{/if}
+          <p class="hint" id="sidebar-bg-hint">Every background has a light and a dark version and follows your theme, so the sidebar text stays easy to read. Colours and pictures are made paler or deeper to suit.</p>
         </div>
         <div class="field">
           <div class="label">Message list</div>
@@ -520,5 +588,21 @@
   .about { display: grid; justify-items: center; text-align: center; padding-top: 40px; }
   .wordmark { margin-top: 12px; font-size: 26px; letter-spacing: -0.03em; font-weight: 450; }
   .wordmark b { font-weight: 800; }
+  .swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+  .swatch { position: relative; display: flex; flex-direction: column; justify-content: space-between; width: 72px; height: 80px; padding: 8px; border: 1px solid var(--border); border-radius: 10px; text-align: left; cursor: pointer; overflow: hidden; }
+  .swatch:hover { border-color: var(--muted); }
+  .swatch[aria-pressed="true"], .swatch.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+  .swatch:focus-visible, .swatch:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .sample { font-size: 15px; font-weight: 700; color: var(--text); line-height: 1; }
+  .sample i { display: block; width: 34px; height: 4px; margin-top: 6px; border-radius: 2px; background: var(--muted); }
+  .name { font-size: 11px; font-weight: 600; color: var(--muted); }
+  .wheel { position: absolute; top: 7px; right: 7px; width: 14px; height: 14px; border-radius: 50%; background: conic-gradient(#e5484d, #f5a524, #46a758, #0e7490, #6e56cf, #e5484d); }
+  .hidden-input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; border: 0; padding: 0; }
+  .picture-row { position: relative; display: flex; gap: 6px; margin-top: 10px; }
+  .picture-row .hidden-input { display: none; }
+  .link-btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid var(--border); border-radius: 7px; font-size: 13px; color: var(--text); background: var(--bg); }
+  .link-btn:hover { border-color: var(--muted); }
+  .link-btn:disabled { opacity: 0.7; cursor: default; }
+  .hint.bad { color: var(--danger); }
   .tagline { margin: 4px 0 18px; color: var(--muted); }
 </style>
