@@ -879,18 +879,37 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The other messages in a message's conversation (same account), oldest first.
+    /// The messages in a message's conversation (same account), oldest first. One email that
+    /// sits in several folders (Gmail labels: Inbox, Important, Sent…) is listed once: the
+    /// copy that was opened, else one in the same folder, else the Inbox copy.
     pub fn thread(&self, id: i64) -> Result<Vec<MessageSummary>> {
-        let (key, account): (Option<String>, i64) = self.db.query_row(
-            "select m.thread_key, f.account_id from messages m join folders f on f.id = m.folder_id where m.id = ?1",
+        let (key, account, folder): (Option<String>, i64, i64) = self.db.query_row(
+            "select m.thread_key, f.account_id, m.folder_id from messages m join folders f on f.id = m.folder_id where m.id = ?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
         let Some(key) = key else { return Ok(Vec::new()) };
-        self.summaries(
-            "where m.thread_key = ?1 and f.account_id = ?2 and m.deleted = 0 order by m.date asc limit 100",
-            params![key, account],
-        )
+        let message_ids: std::collections::HashMap<i64, String> = self
+            .db
+            .prepare(
+                "select m.id, coalesce(m.message_id, 'id:' || m.id) from messages m join folders f on f.id = m.folder_id
+                 where m.thread_key = ?1 and f.account_id = ?2 and m.deleted = 0",
+            )?
+            .query_map(params![key, account], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        let candidates = self.summaries(
+            "where m.thread_key = ?1 and f.account_id = ?2 and m.deleted = 0
+             order by m.id = ?3 desc, m.folder_id = ?4 desc, f.role = 'inbox' desc, m.id asc limit 500",
+            params![key, account, id, folder],
+        )?;
+        let mut seen = std::collections::HashSet::new();
+        let mut thread: Vec<MessageSummary> = candidates
+            .into_iter()
+            .filter(|m| seen.insert(message_ids.get(&m.id).cloned().unwrap_or_else(|| format!("id:{}", m.id))))
+            .collect();
+        thread.sort_by_key(|m| (m.date, m.id));
+        thread.truncate(100);
+        Ok(thread)
     }
 
     /// Fills in conversation keys for messages indexed before threads existed. Returns how
@@ -1698,6 +1717,10 @@ mod tests {
             assert_eq!(m.unread, m.account_id != me.id, "{} in {}", m.folder_name, m.account_id);
         }
         assert_eq!(store.accounts()?.iter().find(|a| a.id == me.id).unwrap().unread, 0);
+
+        let thread = store.thread(inbox)?;
+        assert_eq!(thread.len(), 1, "one email in three folders is a conversation of one");
+        assert_eq!(thread[0].id, inbox, "the copy you opened is the one listed");
         let _ = fs::remove_dir_all(&dir);
         Ok(())
     }
