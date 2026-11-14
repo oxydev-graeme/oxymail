@@ -3410,7 +3410,7 @@ dependencies = [
 
 [[package]]
 name = "oxymail-app"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
